@@ -25,6 +25,7 @@ mongoose
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/profile", require("./routes/profile"));
 app.use("/api/photos", require("./routes/photos"));
+app.use("/api/matching", require("./routes/matching"));
 app.use("/api/debug", require("./routes/debug")); // Temporary debug routes
 
 // Health check endpoint

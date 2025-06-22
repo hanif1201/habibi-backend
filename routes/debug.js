@@ -1,6 +1,9 @@
 const express = require("express");
 const { v2: cloudinary } = require("cloudinary");
 const { authenticate } = require("../middleware/auth");
+const User = require("../models/User");
+const Swipe = require("../models/Swipe");
+const Match = require("../models/Match");
 
 const router = express.Router();
 
@@ -64,6 +67,65 @@ router.get("/env", authenticate, (req, res) => {
     success: true,
     environment: envCheck,
   });
+});
+
+// @route   GET /api/debug/matching
+// @desc    Test matching models and data
+// @access  Private
+router.get("/matching", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Test basic counts
+    const swipeCount = await Swipe.countDocuments({ swiper: userId });
+    const matchCount = await Match.countDocuments({ users: userId });
+    const userCount = await User.countDocuments({ isActive: true });
+
+    // Test individual swipe actions
+    const likes = await Swipe.countDocuments({
+      swiper: userId,
+      action: "like",
+    });
+    const passes = await Swipe.countDocuments({
+      swiper: userId,
+      action: "pass",
+    });
+    const superlikes = await Swipe.countDocuments({
+      swiper: userId,
+      action: "superlike",
+    });
+    const likesReceived = await Swipe.countDocuments({
+      swiped: userId,
+      action: { $in: ["like", "superlike"] },
+    });
+
+    res.json({
+      success: true,
+      debug: {
+        userId: userId,
+        counts: {
+          totalSwipes: swipeCount,
+          totalMatches: matchCount,
+          totalUsers: userCount,
+          likes,
+          passes,
+          superlikes,
+          likesReceived,
+        },
+        models: {
+          swipeModelExists: !!Swipe,
+          matchModelExists: !!Match,
+          userModelExists: !!User,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error testing matching system",
+      error: error.message,
+    });
+  }
 });
 
 module.exports = router;
