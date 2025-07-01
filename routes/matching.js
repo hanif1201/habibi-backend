@@ -3,6 +3,7 @@ const { authenticate } = require("../middleware/auth");
 const User = require("../models/User");
 const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
+const Message = require("../models/Message");
 
 const router = express.Router();
 
@@ -214,10 +215,11 @@ router.post("/swipe", authenticate, async (req, res) => {
       const mutualLike = await Swipe.checkMutualLike(swiperId, swipedUserId);
 
       if (mutualLike) {
-        // Create match
+        // Create match with enhanced properties
         match = new Match({
           users: [swiperId, swipedUserId],
           initiatedBy: swiperId,
+          matchType: action === "superlike" ? "superlike" : "regular",
         });
 
         await match.save();
@@ -239,10 +241,20 @@ router.post("/swipe", authenticate, async (req, res) => {
       match: isMatch
         ? {
             _id: match._id,
-            otherUser: match.users.find(
-              (user) => user._id.toString() !== swiperId.toString()
-            ),
+            otherUser: {
+              ...match.users
+                .find((user) => user._id.toString() !== swiperId.toString())
+                .toObject(),
+              age: calculateAge(
+                match.users.find(
+                  (user) => user._id.toString() !== swiperId.toString()
+                ).dateOfBirth
+              ),
+            },
             matchedAt: match.matchedAt,
+            matchType: match.matchType,
+            expiresAt: match.expiresAt,
+            timeToExpiration: match.timeToExpiration,
           }
         : null,
     });
@@ -256,14 +268,43 @@ router.post("/swipe", authenticate, async (req, res) => {
 });
 
 // @route   GET /api/matching/matches
-// @desc    Get user's matches
+// @desc    Get user's matches with enhanced information
 // @access  Private
 router.get("/matches", authenticate, async (req, res) => {
   try {
+    // First, expire old matches
+    await Match.expireOldMatches();
+
     const matches = await Match.findForUser(req.user._id);
+
+    // Get message information for each match
+    const matchIds = matches.map((match) => match._id);
+
+    // Get last messages for all matches
+    const lastMessages = await Message.aggregate([
+      {
+        $match: {
+          match: { $in: matchIds },
+          isDeleted: false,
+        },
+      },
+      {
+        $sort: { createdAt: -1 },
+      },
+      {
+        $group: {
+          _id: "$match",
+          lastMessage: { $first: "$ROOT" },
+        },
+      },
+    ]);
 
     const formattedMatches = matches.map((match) => {
       const otherUser = match.getOtherUser(req.user._id);
+      const lastMessageData = lastMessages.find(
+        (msg) => msg._id.toString() === match._id.toString()
+      );
+
       return {
         _id: match._id,
         user: {
@@ -279,6 +320,94 @@ router.get("/matches", authenticate, async (req, res) => {
         },
         matchedAt: match.matchedAt,
         lastActivity: match.lastActivity,
+        matchType: match.matchType,
+        status: match.status,
+        firstMessageSentAt: match.firstMessageSentAt,
+        firstMessageSentBy: match.firstMessageSentBy,
+        expiresAt: match.expiresAt,
+        timeToExpiration: match.timeToExpiration,
+        urgencyLevel: match.urgencyLevel,
+        conversationStarted: !!match.firstMessageSentAt,
+        lastMessage: lastMessageData
+          ? {
+              content: lastMessageData.lastMessage.content,
+              createdAt: lastMessageData.lastMessage.createdAt,
+              senderId: lastMessageData.lastMessage.sender,
+              isFromMe:
+                lastMessageData.lastMessage.sender.toString() ===
+                req.user._id.toString(),
+            }
+          : null,
+      };
+    });
+
+    // Sort matches: new matches first, then by urgency, then by last activity
+    formattedMatches.sort((a, b) => {
+      // Prioritize matches that need first message
+      if (!a.conversationStarted && b.conversationStarted) return -1;
+      if (a.conversationStarted && !b.conversationStarted) return 1;
+
+      // For matches without conversation, sort by urgency
+      if (!a.conversationStarted && !b.conversationStarted) {
+        const urgencyOrder = { expired: 0, critical: 1, warning: 2, normal: 3 };
+        return urgencyOrder[a.urgencyLevel] - urgencyOrder[b.urgencyLevel];
+      }
+
+      // For matches with conversations, sort by last activity
+      return new Date(b.lastActivity) - new Date(a.lastActivity);
+    });
+
+    res.json({
+      success: true,
+      matches: formattedMatches,
+      summary: {
+        total: formattedMatches.length,
+        newMatches: formattedMatches.filter((m) => !m.conversationStarted)
+          .length,
+        activeConversations: formattedMatches.filter(
+          (m) => m.conversationStarted
+        ).length,
+        expiringSoon: formattedMatches.filter(
+          (m) => m.urgencyLevel === "critical"
+        ).length,
+      },
+    });
+  } catch (error) {
+    console.error("Get matches error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching matches",
+    });
+  }
+});
+
+// @route   GET /api/matching/pending
+// @desc    Get matches that need first message
+// @access  Private
+router.get("/pending", authenticate, async (req, res) => {
+  try {
+    const pendingMatches = await Match.findPendingForUser(req.user._id);
+
+    const formattedMatches = pendingMatches.map((match) => {
+      const otherUser = match.getOtherUser(req.user._id);
+      return {
+        _id: match._id,
+        user: {
+          _id: otherUser._id,
+          firstName: otherUser.firstName,
+          lastName: otherUser.lastName,
+          age: calculateAge(otherUser.dateOfBirth),
+          bio: otherUser.bio,
+          photos: otherUser.photos,
+          primaryPhoto:
+            otherUser.photos?.find((photo) => photo.isPrimary) ||
+            otherUser.photos?.[0],
+        },
+        matchedAt: match.matchedAt,
+        expiresAt: match.expiresAt,
+        timeToExpiration: match.timeToExpiration,
+        urgencyLevel: match.urgencyLevel,
+        matchType: match.matchType,
       };
     });
 
@@ -287,10 +416,57 @@ router.get("/matches", authenticate, async (req, res) => {
       matches: formattedMatches,
     });
   } catch (error) {
-    console.error("Get matches error:", error);
+    console.error("Get pending matches error:", error);
     res.status(500).json({
       success: false,
-      message: "Error fetching matches",
+      message: "Error fetching pending matches",
+    });
+  }
+});
+
+// @route   PUT /api/matching/matches/:matchId/extend
+// @desc    Extend match expiration (premium feature)
+// @access  Private
+router.put("/matches/:matchId/extend", authenticate, async (req, res) => {
+  try {
+    const match = await Match.findById(req.params.matchId);
+
+    if (!match) {
+      return res.status(404).json({
+        success: false,
+        message: "Match not found",
+      });
+    }
+
+    // Check if current user is part of this match
+    if (!match.users.includes(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "You are not part of this match",
+      });
+    }
+
+    const { hours = 24 } = req.body;
+
+    try {
+      await match.extendExpiration(hours);
+
+      res.json({
+        success: true,
+        message: `Match expiration extended by ${hours} hours`,
+        newExpirationTime: match.expiresAt,
+      });
+    } catch (error) {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+    }
+  } catch (error) {
+    console.error("Extend match error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error extending match",
     });
   }
 });
@@ -333,11 +509,11 @@ router.delete("/matches/:matchId", authenticate, async (req, res) => {
 });
 
 // @route   GET /api/matching/stats
-// @desc    Get user's swipe statistics
+// @desc    Get user's swipe statistics with match insights
 // @access  Private
 router.get("/stats", authenticate, async (req, res) => {
   try {
-    // Get swipe stats with better error handling
+    // Get swipe stats
     let swipeStats = {
       likes: 0,
       passes: 0,
@@ -386,10 +562,23 @@ router.get("/stats", authenticate, async (req, res) => {
       };
     }
 
-    // Get match count
+    // Get match count and conversation stats
     const matchCount = await Match.countDocuments({
       users: req.user._id,
       status: "active",
+    });
+
+    const conversationCount = await Match.countDocuments({
+      users: req.user._id,
+      status: "active",
+      firstMessageSentAt: { $ne: null },
+    });
+
+    const pendingMatches = await Match.countDocuments({
+      users: req.user._id,
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: { $gt: new Date() },
     });
 
     // Get likes received count
@@ -403,7 +592,17 @@ router.get("/stats", authenticate, async (req, res) => {
       stats: {
         ...swipeStats,
         matches: matchCount,
+        conversations: conversationCount,
+        pendingMatches,
         likesReceived,
+        conversionRate:
+          swipeStats.likes > 0
+            ? Math.round((matchCount / swipeStats.likes) * 100)
+            : 0,
+        messageRate:
+          matchCount > 0
+            ? Math.round((conversationCount / matchCount) * 100)
+            : 0,
       },
     });
   } catch (error) {
@@ -411,6 +610,27 @@ router.get("/stats", authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error fetching stats: " + error.message,
+    });
+  }
+});
+
+// @route   POST /api/matching/cleanup-expired
+// @desc    Manually trigger cleanup of expired matches (admin/cron job)
+// @access  Private
+router.post("/cleanup-expired", authenticate, async (req, res) => {
+  try {
+    const expiredCount = await Match.expireOldMatches();
+
+    res.json({
+      success: true,
+      message: `Expired ${expiredCount} old matches`,
+      expiredCount,
+    });
+  } catch (error) {
+    console.error("Cleanup error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error cleaning up expired matches",
     });
   }
 });
