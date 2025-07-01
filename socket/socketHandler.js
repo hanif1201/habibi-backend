@@ -18,17 +18,32 @@ const socketHandler = (io) => {
         return next(new Error("Authentication error"));
       }
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const user = await User.findById(decoded.id);
+      // FIX: Use the correct JWT secret and decode structure
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET || "your-secret-key"
+      );
+
+      // FIX: The JWT contains 'userId', not 'id'
+      const user = await User.findById(decoded.userId);
 
       if (!user) {
-        console.log("❌ Socket auth failed: User not found");
+        console.log(
+          "❌ Socket auth failed: User not found for ID:",
+          decoded.userId
+        );
         return next(new Error("User not found"));
       }
 
+      // FIX: Use consistent userId naming
       socket.userId = user._id.toString();
       socket.user = user;
-      console.log("✅ Socket authenticated for user:", user.firstName);
+      console.log(
+        "✅ Socket authenticated for user:",
+        user.firstName,
+        "ID:",
+        user._id
+      );
       next();
     } catch (error) {
       console.log("❌ Socket auth error:", error.message);
