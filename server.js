@@ -4,26 +4,57 @@ const cors = require("cors");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
+const compression = require("compression");
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
 
+// Security middleware
+app.use(helmet());
+app.use(compression());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: {
+    success: false,
+    message: "Too many requests from this IP, please try again later.",
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // limit each IP to 5 auth requests per windowMs
+  message: {
+    success: false,
+    message: "Too many login attempts, please try again later.",
+  },
+});
+
+app.use("/api/auth", authLimiter);
+app.use("/api/", limiter);
+
 // Create HTTP server for Socket.io
 const server = createServer(app);
 
-// Initialize Socket.io
+// Initialize Socket.io with enhanced configuration
 const io = new Server(server, {
   cors: {
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
   },
   transports: ["polling", "websocket"],
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
-console.log("✅ Socket.io initialized");
+console.log("✅ Socket.io initialized with enhanced config");
 
 // Make io available to routes
 app.use((req, res, next) => {
@@ -31,109 +62,124 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middleware
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-  })
-);
-app.use(express.json());
+// Enhanced CORS configuration
+const corsOptions = {
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL || "http://localhost:3000",
+      "http://localhost:3000",
+      "http://localhost:3001",
+    ];
 
-console.log("✅ Middleware configured");
+    // Allow requests with no origin (mobile apps, Postman, etc.)
+    if (!origin) return callback(null, true);
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/habibi", {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log("✅ MongoDB connected successfully"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+};
 
-// Routes
+app.use(cors(corsOptions));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+console.log("✅ Enhanced middleware configured");
+
+// MongoDB Connection with retry logic
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(
+      process.env.MONGODB_URI || "mongodb://localhost:27017/habibi",
+      {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+        maxPoolSize: 10,
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+        bufferCommands: false,
+        bufferMaxEntries: 0,
+      }
+    );
+
+    console.log(`✅ MongoDB connected: ${conn.connection.host}`);
+
+    // Handle connection events
+    mongoose.connection.on("error", (err) => {
+      console.error("❌ MongoDB connection error:", err);
+    });
+
+    mongoose.connection.on("disconnected", () => {
+      console.log("⚠️ MongoDB disconnected. Attempting to reconnect...");
+    });
+
+    mongoose.connection.on("reconnected", () => {
+      console.log("✅ MongoDB reconnected");
+    });
+  } catch (error) {
+    console.error("❌ MongoDB connection failed:", error);
+    process.exit(1);
+  }
+};
+
+connectDB();
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
+
+// Routes with better error handling
 console.log("📡 Loading routes...");
 
-try {
-  app.use("/api/auth", require("./routes/auth"));
-  console.log("✅ Auth routes loaded");
-} catch (err) {
-  console.log("⚠️  Auth routes not found");
-}
+const routeFiles = [
+  { path: "/api/auth", file: "./routes/auth", name: "Auth" },
+  { path: "/api/profile", file: "./routes/profile", name: "Profile" },
+  { path: "/api/photos", file: "./routes/photos", name: "Photos" },
+  { path: "/api/matching", file: "./routes/matching", name: "Matching" },
+  { path: "/api/chat", file: "./routes/chat", name: "Chat" },
+  { path: "/api/debug", file: "./routes/debug", name: "Debug" },
+];
 
-try {
-  app.use("/api/profile", require("./routes/profile"));
-  console.log("✅ Profile routes loaded");
-} catch (err) {
-  console.log("⚠️  Profile routes not found");
-}
+routeFiles.forEach(({ path, file, name }) => {
+  try {
+    app.use(path, require(file));
+    console.log(`✅ ${name} routes loaded`);
+  } catch (err) {
+    console.error(`❌ Failed to load ${name} routes:`, err.message);
+  }
+});
 
-try {
-  app.use("/api/photos", require("./routes/photos"));
-  console.log("✅ Photos routes loaded");
-} catch (err) {
-  console.log("⚠️  Photos routes not found");
-}
-
-try {
-  app.use("/api/matching", require("./routes/matching"));
-  console.log("✅ Matching routes loaded");
-} catch (err) {
-  console.log("⚠️  Matching routes not found");
-}
-
-// CRITICAL: Add chat routes
-try {
-  app.use("/api/chat", require("./routes/chat"));
-  console.log("✅ Chat routes loaded");
-} catch (err) {
-  console.log("❌ Chat routes not found - creating basic endpoints");
-
-  // Create basic chat endpoints since file doesn't exist
-  app.get("/api/chat/conversations", (req, res) => {
-    res.json({
-      success: true,
-      conversations: [],
-      message:
-        "Chat routes working! (Basic endpoint - no auth required for testing)",
-    });
-  });
-
-  app.get("/api/chat/test", (req, res) => {
-    res.json({
-      success: true,
-      message: "Chat API is working!",
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  console.log("✅ Basic chat endpoints created");
-}
-
-try {
-  app.use("/api/debug", require("./routes/debug"));
-  console.log("✅ Debug routes loaded");
-} catch (err) {
-  console.log("⚠️  Debug routes not found");
-}
-
-// Health check endpoint
+// Health check endpoints
 app.get("/", (req, res) => {
   res.json({
     message: "Habibi Backend is running!",
+    version: "1.0.0",
     socketio: "enabled",
     timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
   });
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({
-    message: "Habibi Backend is running!",
+  const health = {
+    message: "Habibi Backend is healthy!",
+    version: "1.0.0",
     socketio: "enabled",
     mongodb:
       mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+    uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-  });
+    environment: process.env.NODE_ENV || "development",
+  };
+
+  const status = mongoose.connection.readyState === 1 ? 200 : 503;
+  res.status(status).json(health);
 });
 
 // Socket.io connection handler
@@ -142,41 +188,59 @@ try {
   socketHandler(io);
   console.log("✅ Socket handler loaded");
 } catch (err) {
-  console.log("❌ Socket handler not found - creating basic one");
-
-  // Basic socket handler
-  io.on("connection", (socket) => {
-    console.log("👤 User connected:", socket.id);
-
-    socket.emit("welcome", {
-      message: "Connected to Habibi Chat!",
-      socketId: socket.id,
-      timestamp: new Date().toISOString(),
-    });
-
-    socket.on("test_message", (data) => {
-      console.log("📧 Test message:", data);
-      socket.emit("test_response", {
-        message: "Test message received!",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    socket.on("disconnect", (reason) => {
-      console.log("👋 User disconnected:", socket.id, "-", reason);
-    });
-  });
-
-  console.log("✅ Basic socket handler created");
+  console.error("❌ Socket handler failed to load:", err.message);
 }
 
-// Error handling middleware
+// Enhanced error handling middleware
 app.use((err, req, res, next) => {
   console.error("❌ Server error:", err.stack);
-  res.status(500).json({
+
+  // Mongoose validation error
+  if (err.name === "ValidationError") {
+    const errors = Object.values(err.errors).map((e) => e.message);
+    return res.status(400).json({
+      success: false,
+      message: "Validation Error",
+      errors,
+    });
+  }
+
+  // Mongoose duplicate key error
+  if (err.code === 11000) {
+    const field = Object.keys(err.keyValue)[0];
+    return res.status(400).json({
+      success: false,
+      message: `${field} already exists`,
+    });
+  }
+
+  // JWT errors
+  if (err.name === "JsonWebTokenError") {
+    return res.status(401).json({
+      success: false,
+      message: "Invalid token",
+    });
+  }
+
+  if (err.name === "TokenExpiredError") {
+    return res.status(401).json({
+      success: false,
+      message: "Token expired",
+    });
+  }
+
+  // Multer errors
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({
+      success: false,
+      message: "File too large",
+    });
+  }
+
+  // Default error
+  res.status(err.status || 500).json({
     success: false,
-    message: "Something went wrong!",
-    error:
+    message:
       process.env.NODE_ENV === "development"
         ? err.message
         : "Internal server error",
@@ -185,7 +249,6 @@ app.use((err, req, res, next) => {
 
 // 404 handler
 app.use("*", (req, res) => {
-  console.log("❌ 404 - Route not found:", req.originalUrl);
   res.status(404).json({
     success: false,
     message: `Route ${req.originalUrl} not found`,
@@ -194,7 +257,22 @@ app.use("*", (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 
-// Use server.listen instead of app.listen for Socket.io
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("👋 SIGTERM received, shutting down gracefully");
+  server.close(() => {
+    mongoose.connection.close();
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("👋 SIGINT received, shutting down gracefully");
+  server.close(() => {
+    mongoose.connection.close();
+  });
+});
+
+// Start server
 server.listen(PORT, () => {
   console.log("\n🎉 HABIBI BACKEND STARTED!");
   console.log("==========================");
@@ -208,10 +286,11 @@ server.listen(PORT, () => {
   console.log(
     `🌍 CORS: ${process.env.FRONTEND_URL || "http://localhost:3000"}`
   );
+  console.log(`🔒 Environment: ${process.env.NODE_ENV || "development"}`);
   console.log("\n🔗 Test these URLs:");
   console.log(`   http://localhost:${PORT}/`);
   console.log(`   http://localhost:${PORT}/api/health`);
-  console.log(`   http://localhost:${PORT}/api/chat/conversations`);
-  console.log(`   http://localhost:${PORT}/api/chat/test`);
   console.log("\n✅ Ready for connections!");
 });
+
+module.exports = app;
