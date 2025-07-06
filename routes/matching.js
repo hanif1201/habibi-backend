@@ -5,6 +5,7 @@ const User = require("../models/User");
 const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
+const { sendPushNotification } = require("./notifications");
 
 const router = express.Router();
 
@@ -450,16 +451,55 @@ router.post(
 
           isMatch = true;
 
-          // Send push notification to matched user if enabled
-          if (swipedUser.settings?.notifications?.matches) {
-            // TODO: Implement push notification
-            console.log(`📱 Match notification for ${swipedUser.firstName}`);
-          }
+          // Send match notifications to both users
+          await Promise.all([
+            sendPushNotification(swiperId, {
+              title: "💖 It's a Match!",
+              body: `You and ${swipedUser.firstName} liked each other!`,
+              type: "new_match",
+              userName: swipedUser.firstName,
+              data: {
+                url: "/chat",
+                matchId: match._id,
+                userId: swipedUserId,
+              },
+            }),
+            sendPushNotification(swipedUserId, {
+              title: "💖 It's a Match!",
+              body: `You and ${currentUser.firstName} liked each other!`,
+              type: "new_match",
+              userName: currentUser.firstName,
+              data: {
+                url: "/chat",
+                matchId: match._id,
+                userId: swiperId,
+              },
+            }),
+          ]);
         } else {
           // Send like notification to swiped user
-          if (swipedUser.settings?.notifications?.likes) {
-            // TODO: Implement push notification
-            console.log(`❤️ Like notification for ${swipedUser.firstName}`);
+          if (action === "superlike") {
+            await sendPushNotification(swipedUserId, {
+              title: "⭐ Super Like!",
+              body: `${currentUser.firstName} super liked you!`,
+              type: "super_like",
+              userName: currentUser.firstName,
+              data: {
+                url: "/dashboard",
+                userId: swiperId,
+              },
+            });
+          } else {
+            await sendPushNotification(swipedUserId, {
+              title: "❤️ Someone likes you!",
+              body: `${currentUser.firstName} liked your profile`,
+              type: "new_like",
+              userName: currentUser.firstName,
+              data: {
+                url: "/dashboard",
+                userId: swiperId,
+              },
+            });
           }
         }
       }
@@ -649,6 +689,9 @@ router.get("/matches", authenticate, async (req, res) => {
 
     // First, expire old matches
     await Match.expireOldMatches();
+
+    // Check for matches expiring soon and send notifications
+    await sendExpiringMatchNotifications(req.user._id);
 
     let matchQuery = {
       users: req.user._id,
@@ -1228,6 +1271,45 @@ async function getSwipeStatsForPeriod(userId, fromDate) {
     return result;
   } catch (error) {
     return { likes: 0, passes: 0, superlikes: 0, total: 0 };
+  }
+}
+
+// Helper function to send expiring match notifications
+async function sendExpiringMatchNotifications(userId) {
+  try {
+    const expiringMatches = await Match.find({
+      users: userId,
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: new Date(),
+        $lt: new Date(Date.now() + 12 * 60 * 60 * 1000), // Next 12 hours
+      },
+    }).populate("users", "firstName lastName");
+
+    for (const match of expiringMatches) {
+      const otherUser = match.users.find(
+        (u) => u._id.toString() !== userId.toString()
+      );
+      const timeLeft = Math.ceil(
+        (match.expiresAt - new Date()) / (1000 * 60 * 60)
+      ); // Hours
+
+      await sendPushNotification(userId, {
+        title: "⏰ Match Expiring Soon",
+        body: `Your match with ${otherUser.firstName} expires in ${timeLeft} hours`,
+        type: "match_expiring",
+        userName: otherUser.firstName,
+        timeLeft: `${timeLeft} hours`,
+        data: {
+          url: "/chat",
+          matchId: match._id,
+          userId: otherUser._id,
+        },
+      });
+    }
+  } catch (error) {
+    console.error("Error sending expiring match notifications:", error);
   }
 }
 

@@ -398,6 +398,23 @@ const UserSchema = new mongoose.Schema(
     deviceInfo: {
       type: String,
     },
+    notificationSettings: {
+      pushSubscription: mongoose.Schema.Types.Mixed,
+      userAgent: String,
+      subscribedAt: Date,
+      preferences: {
+        matches: { type: Boolean, default: true },
+        messages: { type: Boolean, default: true },
+        likes: { type: Boolean, default: true },
+        superLikes: { type: Boolean, default: true },
+        profileViews: { type: Boolean, default: false },
+        matchExpiring: { type: Boolean, default: true },
+        email: { type: Boolean, default: true },
+        push: { type: Boolean, default: true },
+        sound: { type: Boolean, default: true },
+        vibration: { type: Boolean, default: true },
+      },
+    },
   },
   {
     timestamps: true,
