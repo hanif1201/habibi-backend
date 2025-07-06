@@ -7,232 +7,216 @@ const User = require("../models/User");
 
 const router = express.Router();
 
-// Configure Cloudinary
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET,
-});
-
-// Test Cloudinary configuration
-const testCloudinaryConnection = async () => {
+// Configure Cloudinary with better error handling
+const configureCloudinary = () => {
   try {
-    await cloudinary.api.ping();
-    console.log("✅ Cloudinary connection successful");
+    if (
+      !process.env.CLOUDINARY_CLOUD_NAME ||
+      !process.env.CLOUDINARY_API_KEY ||
+      !process.env.CLOUDINARY_API_SECRET
+    ) {
+      console.error("❌ Missing Cloudinary configuration");
+      throw new Error("Cloudinary configuration missing");
+    }
+
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET,
+      secure: true,
+    });
+
+    console.log("✅ Cloudinary configured successfully");
     return true;
   } catch (error) {
-    console.error("❌ Cloudinary connection failed:", error.message);
+    console.error("❌ Cloudinary configuration error:", error);
     return false;
   }
 };
 
-// Initialize Cloudinary connection test
-testCloudinaryConnection();
+// Initialize Cloudinary
+const cloudinaryConfigured = configureCloudinary();
 
-// Configure Cloudinary storage for multer with error handling
-const storage = new CloudinaryStorage({
-  cloudinary: cloudinary,
-  params: async (req, file) => {
-    try {
-      // Validate file type
-      const allowedFormats = ["jpg", "jpeg", "png", "webp"];
-      const fileExtension = file.originalname.split(".").pop().toLowerCase();
+// Fallback storage for when Cloudinary is not available
+const localStorage = multer.memoryStorage();
 
-      if (!allowedFormats.includes(fileExtension)) {
-        throw new Error(
-          `Invalid file format. Allowed: ${allowedFormats.join(", ")}`
-        );
-      }
-
-      return {
+// Configure Cloudinary storage with error handling
+let storage;
+if (cloudinaryConfigured) {
+  try {
+    storage = new CloudinaryStorage({
+      cloudinary: cloudinary,
+      params: {
         folder: "habibi/users",
-        allowed_formats: allowedFormats,
+        allowed_formats: ["jpg", "jpeg", "png", "webp"],
         transformation: [
           { width: 800, height: 800, crop: "fill", quality: "auto:good" },
           { flags: "progressive" },
         ],
-        public_id: `user_${req.user._id}_${Date.now()}_${Math.random()
-          .toString(36)
-          .substring(2, 15)}`,
-        resource_type: "image",
-      };
-    } catch (error) {
-      console.error("Cloudinary storage params error:", error);
-      throw error;
-    }
-  },
-});
+        public_id: (req, file) => {
+          return `user_${req.user._id}_${Date.now()}_${Math.random()
+            .toString(36)
+            .substring(2, 15)}`;
+        },
+      },
+    });
+    console.log("✅ CloudinaryStorage configured");
+  } catch (error) {
+    console.error("❌ CloudinaryStorage error:", error);
+    storage = localStorage;
+  }
+} else {
+  storage = localStorage;
+}
 
 // File filter to validate image types
 const fileFilter = (req, file, cb) => {
-  console.log("File filter - MIME type:", file.mimetype);
-  console.log("File filter - Original name:", file.originalname);
+  console.log("🔍 File filter check:", file.mimetype);
 
-  // Check MIME type
   if (file.mimetype.startsWith("image/")) {
-    // Additional check for allowed extensions
-    const allowedExtensions = ["jpg", "jpeg", "png", "webp"];
-    const fileExtension = file.originalname.split(".").pop().toLowerCase();
-
-    if (allowedExtensions.includes(fileExtension)) {
-      cb(null, true);
-    } else {
-      cb(
-        new Error(
-          `Invalid file extension. Allowed: ${allowedExtensions.join(", ")}`
-        ),
-        false
-      );
-    }
+    cb(null, true);
   } else {
     cb(new Error("Only image files are allowed"), false);
   }
 };
 
-// Multer configuration with enhanced error handling
+// Multer configuration with better error handling
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
-    files: 1, // Only allow 1 file at a time
+    files: 1,
+  },
+  onError: (err, next) => {
+    console.error("❌ Multer error:", err);
+    next(err);
   },
 });
+
+// Alternative upload function for when Cloudinary is not available
+const uploadToCloudinaryManually = async (buffer, filename, userId) => {
+  try {
+    return new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: "habibi/users",
+          public_id: `user_${userId}_${Date.now()}_${Math.random()
+            .toString(36)
+            .substring(2, 15)}`,
+          transformation: [
+            { width: 800, height: 800, crop: "fill", quality: "auto:good" },
+            { flags: "progressive" },
+          ],
+          resource_type: "image",
+        },
+        (error, result) => {
+          if (error) {
+            console.error("❌ Cloudinary upload error:", error);
+            reject(error);
+          } else {
+            console.log("✅ Cloudinary upload success:", result.public_id);
+            resolve(result);
+          }
+        }
+      );
+
+      uploadStream.end(buffer);
+    });
+  } catch (error) {
+    console.error("❌ Manual Cloudinary upload error:", error);
+    throw error;
+  }
+};
 
 // @route   POST /api/photos/upload
 // @desc    Upload a new photo with enhanced error handling
 // @access  Private
 router.post("/upload", authenticate, (req, res) => {
-  // Check Cloudinary environment variables first
-  if (
-    !process.env.CLOUDINARY_CLOUD_NAME ||
-    !process.env.CLOUDINARY_API_KEY ||
-    !process.env.CLOUDINARY_API_SECRET
-  ) {
-    console.error("❌ Missing Cloudinary environment variables");
+  console.log("📤 Photo upload request received");
+  console.log("👤 User ID:", req.user._id);
+  console.log("🔧 Cloudinary configured:", cloudinaryConfigured);
+
+  // Check if Cloudinary is configured
+  if (!cloudinaryConfigured) {
     return res.status(500).json({
       success: false,
-      message: "Server configuration error: Missing Cloudinary credentials",
-      error: "CLOUDINARY_CONFIG_MISSING",
+      message: "Photo upload service is not properly configured",
+      error: "CLOUDINARY_NOT_CONFIGURED",
+      details: {
+        missingEnvVars: [
+          !process.env.CLOUDINARY_CLOUD_NAME && "CLOUDINARY_CLOUD_NAME",
+          !process.env.CLOUDINARY_API_KEY && "CLOUDINARY_API_KEY",
+          !process.env.CLOUDINARY_API_SECRET && "CLOUDINARY_API_SECRET",
+        ].filter(Boolean),
+      },
     });
   }
 
-  console.log("📸 Starting photo upload for user:", req.user._id);
-  console.log("📋 Cloudinary config check:");
-  console.log(
-    "  - Cloud Name:",
-    process.env.CLOUDINARY_CLOUD_NAME ? "✅ Set" : "❌ Missing"
-  );
-  console.log(
-    "  - API Key:",
-    process.env.CLOUDINARY_API_KEY ? "✅ Set" : "❌ Missing"
-  );
-  console.log(
-    "  - API Secret:",
-    process.env.CLOUDINARY_API_SECRET ? "✅ Set" : "❌ Missing"
-  );
-
-  // Use multer middleware with comprehensive error handling
+  // Use multer middleware with error handling
   upload.single("photo")(req, res, async (err) => {
     try {
-      // Handle multer-specific errors
+      console.log("📋 Processing upload...");
+
+      // Handle multer errors
       if (err) {
         console.error("❌ Multer error:", err);
 
         if (err instanceof multer.MulterError) {
-          switch (err.code) {
-            case "LIMIT_FILE_SIZE":
-              return res.status(400).json({
-                success: false,
-                message: "File too large. Maximum size is 5MB.",
-                error: "FILE_TOO_LARGE",
-              });
-            case "LIMIT_FILE_COUNT":
-              return res.status(400).json({
-                success: false,
-                message: "Too many files. Only 1 file allowed.",
-                error: "TOO_MANY_FILES",
-              });
-            case "LIMIT_UNEXPECTED_FILE":
-              return res.status(400).json({
-                success: false,
-                message: "Unexpected field name. Use 'photo' as field name.",
-                error: "UNEXPECTED_FIELD",
-              });
-            default:
-              return res.status(400).json({
-                success: false,
-                message: `Upload error: ${err.message}`,
-                error: "MULTER_ERROR",
-              });
+          if (err.code === "LIMIT_FILE_SIZE") {
+            return res.status(400).json({
+              success: false,
+              message: "File too large. Maximum size is 5MB.",
+              error: "FILE_TOO_LARGE",
+            });
+          }
+          if (err.code === "LIMIT_FILE_COUNT") {
+            return res.status(400).json({
+              success: false,
+              message: "Too many files. Only one file allowed.",
+              error: "TOO_MANY_FILES",
+            });
           }
         }
 
-        // Handle custom file filter errors
-        if (
-          err.message.includes("Invalid file") ||
-          err.message.includes("Only image files")
-        ) {
+        if (err.message === "Only image files are allowed") {
           return res.status(400).json({
             success: false,
-            message: err.message,
+            message: "Only image files (JPG, JPEG, PNG, WEBP) are allowed.",
             error: "INVALID_FILE_TYPE",
           });
         }
 
-        // Handle Cloudinary errors
-        if (err.message.includes("Invalid file format")) {
-          return res.status(400).json({
-            success: false,
-            message: err.message,
-            error: "INVALID_FILE_FORMAT",
-          });
-        }
-
-        // Handle other errors
         return res.status(500).json({
           success: false,
-          message: `Upload failed: ${err.message}`,
-          error: "UPLOAD_ERROR",
-          details:
-            process.env.NODE_ENV === "development" ? err.stack : undefined,
+          message: "Error processing file upload",
+          error: "UPLOAD_PROCESSING_ERROR",
+          details: { message: err.message },
         });
       }
 
       // Check if file was uploaded
       if (!req.file) {
-        console.log("❌ No file provided in request");
+        console.log("❌ No file provided");
         return res.status(400).json({
           success: false,
-          message: "No image file provided. Please select a file to upload.",
-          error: "NO_FILE",
+          message: "No image file provided",
+          error: "NO_FILE_PROVIDED",
         });
       }
 
       console.log("📁 File received:", {
-        filename: req.file.filename,
         originalname: req.file.originalname,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        path: req.file.path,
-        public_id: req.file.public_id,
+        hasPath: !!req.file.path,
+        hasBuffer: !!req.file.buffer,
       });
 
       // Get user from database
       const user = await User.findById(req.user._id);
       if (!user) {
-        // Clean up uploaded file if user not found
-        if (req.file.public_id) {
-          try {
-            await cloudinary.uploader.destroy(req.file.public_id);
-          } catch (cleanupError) {
-            console.error(
-              "Error cleaning up file after user not found:",
-              cleanupError
-            );
-          }
-        }
-
+        console.log("❌ User not found");
         return res.status(404).json({
           success: false,
           message: "User not found",
@@ -242,13 +226,15 @@ router.post("/upload", authenticate, (req, res) => {
 
       // Check if user already has maximum photos (6)
       if (user.photos.length >= 6) {
-        // Delete the uploaded file from Cloudinary since we're rejecting it
+        console.log("❌ Photo limit reached");
+
+        // Delete the uploaded file from Cloudinary if it was uploaded
         if (req.file.public_id) {
           try {
             await cloudinary.uploader.destroy(req.file.public_id);
-            console.log("🗑️ Cleaned up rejected file due to photo limit");
-          } catch (cleanupError) {
-            console.error("Error cleaning up rejected file:", cleanupError);
+            console.log("🗑️ Deleted rejected file from Cloudinary");
+          } catch (deleteError) {
+            console.error("❌ Error deleting rejected file:", deleteError);
           }
         }
 
@@ -260,20 +246,109 @@ router.post("/upload", authenticate, (req, res) => {
         });
       }
 
+      let uploadResult;
+
+      // Debug: Log the entire file object
+      console.log("🔍 Full file object:", JSON.stringify(req.file, null, 2));
+
+      // Handle upload result - check multiple possible properties
+      if (req.file.path && req.file.filename) {
+        // Cloudinary storage was used successfully (path + filename as public_id)
+        console.log(
+          "✅ Cloudinary storage upload successful (path + filename)"
+        );
+        uploadResult = {
+          url: req.file.path,
+          public_id: req.file.filename,
+        };
+      } else if (req.file.path && req.file.public_id) {
+        // Alternative format with explicit public_id
+        console.log(
+          "✅ Cloudinary storage upload successful (path + public_id)"
+        );
+        uploadResult = {
+          url: req.file.path,
+          public_id: req.file.public_id,
+        };
+      } else if (req.file.secure_url && req.file.public_id) {
+        // Alternative Cloudinary storage format
+        console.log(
+          "✅ Cloudinary storage upload successful (secure_url + public_id)"
+        );
+        uploadResult = {
+          url: req.file.secure_url,
+          public_id: req.file.public_id,
+        };
+      } else if (req.file.url && req.file.public_id) {
+        // Another possible Cloudinary format
+        console.log(
+          "✅ Cloudinary storage upload successful (url + public_id)"
+        );
+        uploadResult = {
+          url: req.file.url,
+          public_id: req.file.public_id,
+        };
+      } else if (req.file.buffer) {
+        // Manual Cloudinary upload needed
+        console.log("🔄 Attempting manual Cloudinary upload");
+        try {
+          const cloudinaryResult = await uploadToCloudinaryManually(
+            req.file.buffer,
+            req.file.originalname,
+            req.user._id
+          );
+          uploadResult = {
+            url: cloudinaryResult.secure_url,
+            public_id: cloudinaryResult.public_id,
+          };
+          console.log("✅ Manual Cloudinary upload successful");
+        } catch (cloudinaryError) {
+          console.error("❌ Manual Cloudinary upload failed:", cloudinaryError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to upload image to cloud storage",
+            error: "CLOUDINARY_UPLOAD_FAILED",
+            details: { message: cloudinaryError.message },
+          });
+        }
+      } else {
+        console.error("❌ No valid upload result");
+        console.error("File object keys:", Object.keys(req.file));
+        return res.status(500).json({
+          success: false,
+          message: "Upload processing failed - no result data",
+          error: "NO_UPLOAD_RESULT",
+          debug: {
+            fileKeys: Object.keys(req.file),
+            hasPath: !!req.file.path,
+            hasPublicId: !!req.file.public_id,
+            hasSecureUrl: !!req.file.secure_url,
+            hasUrl: !!req.file.url,
+            hasBuffer: !!req.file.buffer,
+          },
+        });
+      }
+
       // Create photo object
       const newPhoto = {
-        url: req.file.path,
-        public_id: req.file.public_id,
+        url: uploadResult.url,
+        public_id: uploadResult.public_id,
         isPrimary: user.photos.length === 0, // First photo is automatically primary
+        uploadedAt: new Date(),
       };
 
-      console.log("💾 Adding photo to user profile:", newPhoto);
+      console.log("📷 Creating photo object:", {
+        url: newPhoto.url ? "✅" : "❌",
+        public_id: newPhoto.public_id ? "✅" : "❌",
+        isPrimary: newPhoto.isPrimary,
+      });
 
       // Add photo to user's photos array
       user.photos.push(newPhoto);
       await user.save();
 
-      console.log("✅ Photo uploaded successfully");
+      console.log("✅ Photo saved to user profile");
+      console.log("📊 User now has", user.photos.length, "photos");
 
       res.json({
         success: true,
@@ -285,12 +360,14 @@ router.post("/upload", authenticate, (req, res) => {
       console.error("❌ Photo upload error:", error);
 
       // Clean up uploaded file if there's an error
-      if (req.file && req.file.public_id) {
-        try {
-          await cloudinary.uploader.destroy(req.file.public_id);
-          console.log("🗑️ Cleaned up file after error");
-        } catch (cleanupError) {
-          console.error("Error cleaning up uploaded file:", cleanupError);
+      if (req.file) {
+        if (req.file.public_id) {
+          try {
+            await cloudinary.uploader.destroy(req.file.public_id);
+            console.log("🗑️ Cleaned up uploaded file after error");
+          } catch (cleanupError) {
+            console.error("❌ Error cleaning up uploaded file:", cleanupError);
+          }
         }
       }
 
@@ -299,21 +376,66 @@ router.post("/upload", authenticate, (req, res) => {
         success: false,
         message: "Internal server error during photo upload",
         error: "SERVER_ERROR",
-        details:
-          process.env.NODE_ENV === "development"
-            ? {
-                message: error.message,
-                stack: error.stack,
-                cloudinaryConfig: {
-                  cloudName: !!process.env.CLOUDINARY_CLOUD_NAME,
-                  apiKey: !!process.env.CLOUDINARY_API_KEY,
-                  apiSecret: !!process.env.CLOUDINARY_API_SECRET,
-                },
-              }
-            : undefined,
+        details: {
+          message: error.message,
+          stack:
+            process.env.NODE_ENV === "development" ? error.stack : undefined,
+        },
       });
     }
   });
+});
+
+// @route   GET /api/photos/test-cloudinary
+// @desc    Test Cloudinary configuration
+// @access  Private
+router.get("/test-cloudinary", authenticate, async (req, res) => {
+  try {
+    console.log("🧪 Testing Cloudinary configuration...");
+
+    // Test configuration
+    const config = {
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? "✅ Set" : "❌ Missing",
+      api_key: process.env.CLOUDINARY_API_KEY ? "✅ Set" : "❌ Missing",
+      api_secret: process.env.CLOUDINARY_API_SECRET ? "✅ Set" : "❌ Missing",
+    };
+
+    // Test connection
+    if (cloudinaryConfigured) {
+      try {
+        const result = await cloudinary.api.ping();
+        res.json({
+          success: true,
+          message: "Cloudinary is properly configured and accessible",
+          config,
+          ping: result,
+          status: "READY",
+        });
+      } catch (pingError) {
+        res.status(500).json({
+          success: false,
+          message: "Cloudinary configuration found but connection failed",
+          config,
+          error: pingError.message,
+          status: "CONFIG_ERROR",
+        });
+      }
+    } else {
+      res.status(500).json({
+        success: false,
+        message: "Cloudinary is not properly configured",
+        config,
+        status: "NOT_CONFIGURED",
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error testing Cloudinary configuration",
+      error: error.message,
+      status: "TEST_ERROR",
+    });
+  }
 });
 
 // @route   DELETE /api/photos/:photoId
@@ -321,6 +443,8 @@ router.post("/upload", authenticate, (req, res) => {
 // @access  Private
 router.delete("/:photoId", authenticate, async (req, res) => {
   try {
+    console.log("🗑️ Photo deletion request:", req.params.photoId);
+
     const user = await User.findById(req.user._id);
     const photoId = req.params.photoId;
 
@@ -346,22 +470,15 @@ router.delete("/:photoId", authenticate, async (req, res) => {
     }
 
     const photo = user.photos[photoIndex];
-    console.log("🗑️ Deleting photo:", photo.public_id);
+    console.log("📷 Found photo to delete:", photo.public_id);
 
-    // Delete from Cloudinary
-    if (photo.public_id) {
+    // Delete from Cloudinary if configured
+    if (cloudinaryConfigured && photo.public_id) {
       try {
-        const deleteResult = await cloudinary.uploader.destroy(photo.public_id);
-        console.log("Cloudinary delete result:", deleteResult);
-
-        if (
-          deleteResult.result !== "ok" &&
-          deleteResult.result !== "not found"
-        ) {
-          console.warn("Cloudinary delete warning:", deleteResult);
-        }
+        const result = await cloudinary.uploader.destroy(photo.public_id);
+        console.log("☁️ Cloudinary deletion result:", result);
       } catch (cloudinaryError) {
-        console.error("Error deleting from Cloudinary:", cloudinaryError);
+        console.error("❌ Error deleting from Cloudinary:", cloudinaryError);
         // Continue with database deletion even if Cloudinary deletion fails
       }
     }
@@ -379,19 +496,20 @@ router.delete("/:photoId", authenticate, async (req, res) => {
 
     await user.save();
 
+    console.log("✅ Photo deleted successfully");
+
     res.json({
       success: true,
       message: "Photo deleted successfully",
       user: user.toSafeObject(),
     });
   } catch (error) {
-    console.error("Photo deletion error:", error);
+    console.error("❌ Photo deletion error:", error);
     res.status(500).json({
       success: false,
       message: "Error deleting photo",
-      error: "SERVER_ERROR",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
+      error: "DELETE_ERROR",
+      details: { message: error.message },
     });
   }
 });
@@ -401,6 +519,8 @@ router.delete("/:photoId", authenticate, async (req, res) => {
 // @access  Private
 router.put("/:photoId/primary", authenticate, async (req, res) => {
   try {
+    console.log("⭐ Set primary photo request:", req.params.photoId);
+
     const user = await User.findById(req.user._id);
     const photoId = req.params.photoId;
 
@@ -431,19 +551,20 @@ router.put("/:photoId/primary", authenticate, async (req, res) => {
 
     await user.save();
 
+    console.log("✅ Primary photo updated successfully");
+
     res.json({
       success: true,
       message: "Primary photo updated successfully",
       user: user.toSafeObject(),
     });
   } catch (error) {
-    console.error("Set primary photo error:", error);
+    console.error("❌ Set primary photo error:", error);
     res.status(500).json({
       success: false,
       message: "Error setting primary photo",
-      error: "SERVER_ERROR",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
+      error: "SET_PRIMARY_ERROR",
+      details: { message: error.message },
     });
   }
 });
@@ -466,47 +587,15 @@ router.get("/", authenticate, async (req, res) => {
     res.json({
       success: true,
       photos: user.photos,
+      cloudinaryConfigured: cloudinaryConfigured,
     });
   } catch (error) {
-    console.error("Get photos error:", error);
+    console.error("❌ Get photos error:", error);
     res.status(500).json({
       success: false,
       message: "Error fetching photos",
-      error: "SERVER_ERROR",
-      details:
-        process.env.NODE_ENV === "development" ? error.message : undefined,
-    });
-  }
-});
-
-// @route   GET /api/photos/test-cloudinary
-// @desc    Test Cloudinary connection
-// @access  Private
-router.get("/test-cloudinary", authenticate, async (req, res) => {
-  try {
-    const pingResult = await cloudinary.api.ping();
-
-    res.json({
-      success: true,
-      message: "Cloudinary connection successful",
-      result: pingResult,
-      config: {
-        cloudName: process.env.CLOUDINARY_CLOUD_NAME || "NOT_SET",
-        apiKey: process.env.CLOUDINARY_API_KEY ? "SET" : "NOT_SET",
-        apiSecret: process.env.CLOUDINARY_API_SECRET ? "SET" : "NOT_SET",
-      },
-    });
-  } catch (error) {
-    console.error("Cloudinary test error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Cloudinary connection failed",
-      error: error.message,
-      config: {
-        cloudName: process.env.CLOUDINARY_CLOUD_NAME || "NOT_SET",
-        apiKey: process.env.CLOUDINARY_API_KEY ? "SET" : "NOT_SET",
-        apiSecret: process.env.CLOUDINARY_API_SECRET ? "SET" : "NOT_SET",
-      },
+      error: "FETCH_ERROR",
+      details: { message: error.message },
     });
   }
 });
