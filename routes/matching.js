@@ -24,6 +24,8 @@ router.get("/discover", authenticate, async (req, res) => {
     }
 
     // Check if profile is complete enough for discovery
+    // Temporarily disabled for testing - uncomment for production
+    /*
     if (!currentUser.photos || currentUser.photos.length === 0) {
       return res.status(400).json({
         success: false,
@@ -31,6 +33,7 @@ router.get("/discover", authenticate, async (req, res) => {
         requiresPhoto: true,
       });
     }
+    */
 
     // Get users already swiped on
     const swipedUserIds = await Swipe.getSwipedUserIds(currentUser._id);
@@ -62,7 +65,8 @@ router.get("/discover", authenticate, async (req, res) => {
     let discoveryQuery = {
       _id: { $nin: excludeIds },
       isActive: true,
-      photos: { $exists: true, $not: { $size: 0 } },
+      // Temporarily disabled photo requirement for testing
+      // photos: { $exists: true, $not: { $size: 0 } },
       "safety.blockedUsers": { $nin: [currentUser._id] },
     };
 

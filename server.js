@@ -1,20 +1,36 @@
+// server.js - ENHANCED FIXED VERSION
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const dotenv = require("dotenv");
-const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const compression = require("compression");
 const mongoSanitize = require("express-mongo-sanitize");
 const xss = require("xss-clean");
 const cron = require("node-cron");
 
+// Import enhanced error handling
+const {
+  AppError,
+  asyncHandler,
+  globalErrorHandler,
+  notFoundHandler,
+  createRateLimit,
+  handleDBConnection,
+  handleSecurityErrors,
+  requestTimeout,
+  healthCheck,
+} = require("./middleware/errorHandler");
+
 // Load environment variables
 dotenv.config();
 
 const app = express();
+
+// Handle database connection errors
+handleDBConnection();
 
 // ===== SECURITY MIDDLEWARE =====
 app.use(
@@ -37,56 +53,86 @@ app.use(compression());
 app.use(mongoSanitize());
 app.use(xss());
 
-// Rate limiting
-const createRateLimit = (windowMs, max, message) =>
-  rateLimit({
-    windowMs,
-    max,
-    message: { success: false, message },
-    standardHeaders: true,
-    legacyHeaders: false,
-  });
-
-const generalLimiter = createRateLimit(
-  15 * 60 * 1000,
-  100,
-  "Too many requests from this IP, please try again later."
-);
-
+// Enhanced rate limiting with different limits for different endpoints
 const authLimiter = createRateLimit(
   15 * 60 * 1000,
   5,
-  "Too many authentication attempts, please try again later."
+  "Too many authentication attempts, please try again later.",
+  "AUTH_RATE_LIMIT"
 );
 
 const uploadLimiter = createRateLimit(
   60 * 60 * 1000,
   10,
-  "Too many upload attempts, please try again later."
+  "Too many upload attempts, please try again later.",
+  "UPLOAD_RATE_LIMIT"
 );
 
 const messageLimiter = createRateLimit(
   1 * 60 * 1000,
   30,
-  "Too many messages sent, please slow down."
+  "Too many messages sent, please slow down.",
+  "MESSAGE_RATE_LIMIT"
 );
 
-// Apply rate limiting
+const generalLimiter = createRateLimit(
+  15 * 60 * 1000,
+  100,
+  "Too many requests from this IP, please try again later.",
+  "GENERAL_RATE_LIMIT"
+);
+
+const swipeLimiter = createRateLimit(
+  60 * 60 * 1000,
+  200,
+  "Too many swipes, please try again later.",
+  "SWIPE_RATE_LIMIT"
+);
+
+// Apply rate limiting to specific routes
 app.use("/api/auth", authLimiter);
 app.use("/api/photos", uploadLimiter);
 app.use("/api/chat", messageLimiter);
+app.use("/api/matching/swipe", swipeLimiter);
 app.use("/api/", generalLimiter);
 
-// ===== BODY PARSING =====
-app.use(express.json({ limit: "10mb" }));
+// ===== REQUEST TIMEOUT =====
+app.use(requestTimeout(30000)); // 30 second timeout
+
+// ===== BODY PARSING WITH ENHANCED LIMITS =====
+app.use(
+  express.json({
+    limit: "10mb",
+    verify: (req, res, buf) => {
+      try {
+        JSON.parse(buf);
+      } catch (e) {
+        throw new AppError("Invalid JSON format", 400, "INVALID_JSON");
+      }
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // ===== CORS =====
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    origin: function (origin, callback) {
+      const allowedOrigins = [
+        process.env.FRONTEND_URL || "http://localhost:3000",
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "https://habibi-dating.com", // Add your production domain
+      ];
+
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new AppError("Not allowed by CORS", 403, "CORS_ERROR"));
+      }
+    },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
@@ -94,22 +140,25 @@ app.use(
       "Accept",
       "Origin",
     ],
+    maxAge: 86400, // 24 hours
   })
 );
 
-// ===== DATABASE CONNECTION =====
+// ===== ENHANCED DATABASE CONNECTION =====
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+    const mongoOptions = {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
       bufferCommands: false,
-    });
+    };
+
+    const conn = await mongoose.connect(process.env.MONGODB_URI, mongoOptions);
 
     console.log(`✅ MongoDB connected: ${conn.connection.host}`);
 
-    // Handle connection events
+    // Enhanced connection event handling
     mongoose.connection.on("error", (err) => {
       console.error("❌ MongoDB connection error:", err);
     });
@@ -121,20 +170,27 @@ const connectDB = async () => {
     mongoose.connection.on("reconnected", () => {
       console.log("✅ MongoDB reconnected");
     });
+
+    // Graceful shutdown
+    process.on("SIGINT", async () => {
+      await mongoose.connection.close();
+      console.log("MongoDB connection closed through app termination");
+      process.exit(0);
+    });
   } catch (error) {
     console.error("❌ MongoDB connection failed:", error);
     process.exit(1);
   }
 };
 
-// ===== SOCKET.IO HANDLER =====
+// ===== ENHANCED SOCKET.IO HANDLER =====
 const socketHandler = (io) => {
   const activeConnections = new Map();
   const userSockets = new Map();
   const typingUsers = new Map();
   const userRooms = new Map();
 
-  // Socket authentication middleware
+  // Enhanced socket authentication middleware
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
@@ -174,43 +230,48 @@ const socketHandler = (io) => {
 
     console.log(`👤 User ${user.firstName} connected: ${socket.id}`);
 
-    // Track connection
-    activeConnections.set(socket.id, {
-      userId,
-      user,
-      connectedAt: new Date(),
-      lastActivity: new Date(),
-    });
-
-    if (!userSockets.has(userId)) {
-      userSockets.set(userId, new Set());
-    }
-    userSockets.get(userId).add(socket.id);
-
-    userRooms.set(userId, new Set());
-
-    // Update user's last active
-    const User = require("./models/User");
-    await User.findByIdAndUpdate(userId, { lastActive: new Date() });
-
-    // Join user to their match rooms
-    const Match = require("./models/Match");
-    const userMatches = await Match.find({ users: userId, status: "active" });
-
-    for (const match of userMatches) {
-      const roomName = `match_${match._id}`;
-      socket.join(roomName);
-      userRooms.get(userId).add(roomName);
-
-      const otherUserId = match.users.find((u) => u.toString() !== userId);
-      socket.to(roomName).emit("user_online", {
+    try {
+      // Enhanced connection tracking
+      activeConnections.set(socket.id, {
         userId,
-        user: { _id: userId, firstName: user.firstName },
-        matchId: match._id,
+        user,
+        connectedAt: new Date(),
+        lastActivity: new Date(),
+        rooms: new Set(),
       });
+
+      if (!userSockets.has(userId)) {
+        userSockets.set(userId, new Set());
+      }
+      userSockets.get(userId).add(socket.id);
+      userRooms.set(userId, new Set());
+
+      // Update user's last active
+      const User = require("./models/User");
+      await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+
+      // Join user to their match rooms
+      const Match = require("./models/Match");
+      const userMatches = await Match.find({ users: userId, status: "active" });
+
+      for (const match of userMatches) {
+        const roomName = `match_${match._id}`;
+        socket.join(roomName);
+        activeConnections.get(socket.id).rooms.add(roomName);
+        userRooms.get(userId).add(roomName);
+
+        const otherUserId = match.users.find((u) => u.toString() !== userId);
+        socket.to(roomName).emit("user_online", {
+          userId,
+          user: { _id: userId, firstName: user.firstName },
+          matchId: match._id,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error during socket connection setup:", error);
     }
 
-    // Message sending
+    // Enhanced message sending with validation
     socket.on("send_message", async (data) => {
       try {
         const { matchId, content, messageType = "text" } = data;
@@ -222,11 +283,21 @@ const socketHandler = (io) => {
           return;
         }
 
-        // Verify match
+        // Validate message length
+        if (content.trim().length > 1000) {
+          socket.emit("error", {
+            message: "Message too long. Maximum 1000 characters.",
+          });
+          return;
+        }
+
+        // Verify match and permissions
+        const Match = require("./models/Match");
         const match = await Match.findById(matchId).populate(
           "users",
           "firstName lastName safety"
         );
+
         if (!match || !match.users.find((u) => u._id.toString() === userId)) {
           socket.emit("error", {
             message: "Access denied to this conversation",
@@ -245,8 +316,24 @@ const socketHandler = (io) => {
           return;
         }
 
-        // Create message
+        // Enhanced rate limiting
         const Message = require("./models/Message");
+        const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+        const recentMessages = await Message.countDocuments({
+          sender: userId,
+          match: matchId,
+          createdAt: { $gte: oneMinuteAgo },
+        });
+
+        if (recentMessages >= 15) {
+          socket.emit("error", {
+            message: "Too many messages sent. Please slow down.",
+            code: "RATE_LIMIT_EXCEEDED",
+          });
+          return;
+        }
+
+        // Create message
         const message = new Message({
           match: matchId,
           sender: userId,
@@ -293,7 +380,7 @@ const socketHandler = (io) => {
       }
     });
 
-    // Typing indicators
+    // Enhanced typing indicators
     socket.on("typing_start", (data) => {
       const { matchId } = data;
       if (!matchId) return;
@@ -339,19 +426,24 @@ const socketHandler = (io) => {
       }
     });
 
-    // Join/Leave conversation
+    // Enhanced join/leave conversation
     socket.on("join_conversation", async (data) => {
-      const { matchId } = data;
-      const match = await Match.findById(matchId);
-      if (match && match.users.includes(userId)) {
-        socket.join(`match_${matchId}`);
+      try {
+        const { matchId } = data;
+        const Match = require("./models/Match");
+        const match = await Match.findById(matchId);
+        if (match && match.users.includes(userId)) {
+          socket.join(`match_${matchId}`);
 
-        // Mark messages as read
-        const Message = require("./models/Message");
-        await Message.updateMany(
-          { match: matchId, receiver: userId, readAt: null },
-          { readAt: new Date() }
-        );
+          // Mark messages as read
+          const Message = require("./models/Message");
+          await Message.updateMany(
+            { match: matchId, receiver: userId, readAt: null },
+            { readAt: new Date() }
+          );
+        }
+      } catch (error) {
+        console.error("Error joining conversation:", error);
       }
     });
 
@@ -380,39 +472,44 @@ const socketHandler = (io) => {
       }
     });
 
-    // Disconnect handler
+    // Enhanced disconnect handler
     socket.on("disconnect", async (reason) => {
       console.log(`👋 User ${user.firstName} disconnected: ${reason}`);
 
-      activeConnections.delete(socket.id);
+      try {
+        activeConnections.delete(socket.id);
 
-      if (userSockets.has(userId)) {
-        userSockets.get(userId).delete(socket.id);
-        if (userSockets.get(userId).size === 0) {
-          userSockets.delete(userId);
+        if (userSockets.has(userId)) {
+          userSockets.get(userId).delete(socket.id);
+          if (userSockets.get(userId).size === 0) {
+            userSockets.delete(userId);
 
-          // Clean up typing
-          for (const [matchId, typingData] of typingUsers.entries()) {
-            if (typingData.userId === userId) {
-              clearTimeout(typingData.timeout);
-              typingUsers.delete(matchId);
+            // Clean up typing
+            for (const [matchId, typingData] of typingUsers.entries()) {
+              if (typingData.userId === userId) {
+                clearTimeout(typingData.timeout);
+                typingUsers.delete(matchId);
+              }
             }
-          }
 
-          // Notify offline
-          const userRoomsList = userRooms.get(userId) || new Set();
-          userRoomsList.forEach((roomName) => {
-            socket.to(roomName).emit("user_offline", {
-              userId,
-              lastSeen: new Date(),
+            // Notify offline
+            const userRoomsList = userRooms.get(userId) || new Set();
+            userRoomsList.forEach((roomName) => {
+              socket.to(roomName).emit("user_offline", {
+                userId,
+                lastSeen: new Date(),
+              });
             });
-          });
 
-          userRooms.delete(userId);
+            userRooms.delete(userId);
+          }
         }
-      }
 
-      await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+        const User = require("./models/User");
+        await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+      } catch (error) {
+        console.error("Disconnect cleanup error:", error);
+      }
     });
   });
 
@@ -423,63 +520,33 @@ const socketHandler = (io) => {
   return io;
 };
 
-// ===== ROUTES =====
-app.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Server is healthy",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-  });
-});
+// ===== SECURITY ERROR HANDLING =====
+handleSecurityErrors(app);
 
+// ===== HEALTH CHECK =====
+app.get("/health", healthCheck);
+
+// ===== ROUTES =====
 // Middleware to attach io to requests
 app.use((req, res, next) => {
   req.io = io;
   next();
 });
 
-// API routes
-app.use("/api/auth", require("./routes/auth"));
-app.use("/api/photos", require("./routes/photos"));
-app.use("/api/profile", require("./routes/profile"));
-app.use("/api/matching", require("./routes/matching"));
-app.use("/api/chat", require("./routes/chat"));
-app.use("/api/debug", require("./routes/debug"));
-app.use("/api/safety", require("./routes/safety"));
+// API routes with enhanced error handling
+app.use("/api/auth", asyncHandler(require("./routes/auth")));
+app.use("/api/photos", asyncHandler(require("./routes/photos")));
+app.use("/api/profile", asyncHandler(require("./routes/profile")));
+app.use("/api/matching", asyncHandler(require("./routes/matching")));
+app.use("/api/chat", asyncHandler(require("./routes/chat")));
+app.use("/api/debug", asyncHandler(require("./routes/debug")));
+app.use("/api/safety", asyncHandler(require("./routes/safety")));
 
-// ===== ERROR HANDLING =====
-app.use((err, req, res, next) => {
-  console.error("Error:", err);
+// ===== 404 HANDLER =====
+app.all("*", notFoundHandler);
 
-  if (err.name === "ValidationError") {
-    return res.status(400).json({
-      success: false,
-      message: "Validation error",
-      errors: Object.values(err.errors).map((e) => e.message),
-    });
-  }
-
-  if (err.code === 11000) {
-    return res.status(400).json({
-      success: false,
-      message: "Duplicate field value",
-    });
-  }
-
-  res.status(err.statusCode || 500).json({
-    success: false,
-    message: err.message || "Internal server error",
-  });
-});
-
-// 404 handler
-app.use("*", (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.originalUrl} not found`,
-  });
-});
+// ===== GLOBAL ERROR HANDLER =====
+app.use(globalErrorHandler);
 
 // ===== SOCKET.IO SETUP =====
 const server = createServer(app);
@@ -490,12 +557,14 @@ const io = new Server(server, {
     credentials: true,
   },
   transports: ["polling", "websocket"],
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
 // Initialize socket handler
 const socketIO = socketHandler(io);
 
-// ===== CLEANUP JOBS =====
+// ===== ENHANCED CLEANUP JOBS =====
 const startCleanupJobs = () => {
   // Clean up expired matches every hour
   cron.schedule("0 * * * *", async () => {
@@ -518,8 +587,75 @@ const startCleanupJobs = () => {
     }
   });
 
+  // Clean up old login attempts every day
+  cron.schedule("0 0 * * *", async () => {
+    try {
+      const User = require("./models/User");
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+      const result = await User.updateMany(
+        {
+          lockUntil: { $lt: oneDayAgo },
+        },
+        {
+          $unset: { lockUntil: 1, loginAttempts: 1 },
+        }
+      );
+
+      console.log(`🧹 Cleaned up ${result.modifiedCount} locked accounts`);
+    } catch (error) {
+      console.error("❌ Error in account cleanup job:", error);
+    }
+  });
+
+  // Update user activity status every 5 minutes
+  cron.schedule("*/5 * * * *", async () => {
+    try {
+      const User = require("./models/User");
+      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+
+      // This would typically update online status or similar
+      // For now, just log activity
+      const activeUsers = await User.countDocuments({
+        lastActive: { $gte: fifteenMinutesAgo },
+        isActive: true,
+      });
+
+      console.log(`📊 ${activeUsers} users active in last 15 minutes`);
+    } catch (error) {
+      console.error("❌ Error in activity update job:", error);
+    }
+  });
+
   console.log("✅ Cleanup jobs scheduled");
 };
+
+// ===== GRACEFUL SHUTDOWN =====
+const gracefulShutdown = (signal) => {
+  console.log(`\n🔴 Received ${signal}. Starting graceful shutdown...`);
+
+  server.close(() => {
+    console.log("📡 HTTP server closed");
+
+    mongoose.connection.close(false, () => {
+      console.log("💾 MongoDB connection closed");
+      console.log("✅ Graceful shutdown complete");
+      process.exit(0);
+    });
+  });
+
+  // Force close after 30 seconds
+  setTimeout(() => {
+    console.error(
+      "⚠️ Could not close connections in time, forcefully shutting down"
+    );
+    process.exit(1);
+  }, 30000);
+};
+
+// Handle shutdown signals
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 // ===== START SERVER =====
 const PORT = process.env.PORT || 5000;
@@ -535,6 +671,9 @@ const startServer = async () => {
       console.log(`📡 HTTP Server: http://localhost:${PORT}`);
       console.log(`💬 Socket.io: ws://localhost:${PORT}`);
       console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`);
+      console.log(
+        `🗃️ Database: ${process.env.MONGODB_URI ? "Connected" : "Local"}`
+      );
       console.log("✅ Server is ready!");
     });
   } catch (error) {
@@ -542,20 +681,5 @@ const startServer = async () => {
     process.exit(1);
   }
 };
-
-// Handle unhandled rejections
-process.on("unhandledRejection", (err) => {
-  console.error("❌ UNHANDLED REJECTION! 💥 Shutting down...");
-  console.error(err);
-  server.close(() => {
-    process.exit(1);
-  });
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("❌ UNCAUGHT EXCEPTION! 💥 Shutting down...");
-  console.error(err);
-  process.exit(1);
-});
 
 startServer();

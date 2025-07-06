@@ -1,12 +1,14 @@
+// socket/socketHandler.js - ENHANCED FIXED VERSION
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
 
-// Store online users with additional metadata
+// Enhanced data structures with better memory management
 const onlineUsers = new Map();
 const typingUsers = new Map(); // matchId -> { userId, userName, timestamp }
 const userRooms = new Map(); // userId -> Set of room names
+const connectionCleanupTimers = new Map(); // socketId -> timeoutId
 
 const socketHandler = (io) => {
   console.log("🔌 Enhanced Socket.io handler initialized");
@@ -16,19 +18,36 @@ const socketHandler = (io) => {
     try {
       const token = socket.handshake.auth.token;
 
-      if (!token) {
+      if (!token || token === "null" || token === "undefined") {
         console.log("❌ Socket auth failed: No token provided");
         return next(new Error("Authentication error: No token provided"));
       }
 
       // Verify JWT token
-      const decoded = jwt.verify(
-        token,
-        process.env.JWT_SECRET || "your-secret-key"
-      );
+      let decoded;
+      try {
+        decoded = jwt.verify(
+          token,
+          process.env.JWT_SECRET || "your-secret-key"
+        );
+      } catch (jwtError) {
+        console.log("❌ Socket auth failed: Invalid token -", jwtError.message);
+        if (jwtError.name === "TokenExpiredError") {
+          return next(new Error("Token expired"));
+        }
+        return next(new Error("Invalid token"));
+      }
 
-      // Get user from database with safety data
-      const user = await User.findById(decoded.userId).select("+safety");
+      // Get user from database with safety data and essential fields only
+      let user;
+      try {
+        user = await User.findById(decoded.userId)
+          .select("firstName lastName photos safety settings isActive")
+          .lean(); // Use lean() for better performance
+      } catch (dbError) {
+        console.log("❌ Socket auth failed: Database error -", dbError.message);
+        return next(new Error("Database error"));
+      }
 
       if (!user || !user.isActive) {
         console.log(
@@ -53,13 +72,7 @@ const socketHandler = (io) => {
       next();
     } catch (error) {
       console.log("❌ Socket auth error:", error.message);
-      if (error.name === "JsonWebTokenError") {
-        next(new Error("Invalid token"));
-      } else if (error.name === "TokenExpiredError") {
-        next(new Error("Token expired"));
-      } else {
-        next(new Error("Authentication failed"));
-      }
+      next(new Error("Authentication failed"));
     }
   });
 
@@ -71,7 +84,7 @@ const socketHandler = (io) => {
     console.log(`👤 User ${user.firstName} connected: ${socket.id}`);
 
     try {
-      // Add user to online users with enhanced metadata
+      // Enhanced user tracking with connection metadata
       onlineUsers.set(userId, {
         socketId: socket.id,
         user: {
@@ -89,34 +102,64 @@ const socketHandler = (io) => {
       // Initialize user rooms tracking
       userRooms.set(userId, new Set());
 
-      // Update user's last active timestamp
-      await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+      // Update user's last active timestamp (non-blocking)
+      User.findByIdAndUpdate(userId, { lastActive: new Date() }).catch(
+        (err) => {
+          console.error("Error updating lastActive:", err);
+        }
+      );
 
-      // Join user to their match rooms
-      const userMatches = await Match.findForUser(userId);
+      // Join user to their match rooms with error handling
+      try {
+        const userMatches = await Match.find({
+          users: userId,
+          status: "active",
+        })
+          .select("_id users")
+          .lean();
 
-      for (const match of userMatches) {
-        const roomName = `match_${match._id}`;
-        socket.join(roomName);
-        onlineUsers.get(userId).rooms.add(roomName);
-        userRooms.get(userId).add(roomName);
+        for (const match of userMatches) {
+          const roomName = `match_${match._id}`;
+          socket.join(roomName);
 
-        console.log(`🏠 User ${user.firstName} joined room: ${roomName}`);
+          if (onlineUsers.has(userId)) {
+            onlineUsers.get(userId).rooms.add(roomName);
+          }
+          if (userRooms.has(userId)) {
+            userRooms.get(userId).add(roomName);
+          }
 
-        // Notify other user in the match that this user is online
-        const otherUserId = match.getOtherUser(userId);
-        socket.to(roomName).emit("user_online", {
-          userId,
-          user: onlineUsers.get(userId).user,
-          matchId: match._id,
-          timestamp: new Date(),
-        });
+          console.log(`🏠 User ${user.firstName} joined room: ${roomName}`);
+
+          // Notify other user in the match that this user is online
+          const otherUserId = match.users
+            .find((id) => id.toString() !== userId)
+            .toString();
+          socket.to(roomName).emit("user_online", {
+            userId,
+            user: onlineUsers.get(userId).user,
+            matchId: match._id,
+            timestamp: new Date(),
+          });
+        }
+      } catch (matchError) {
+        console.error("Error loading user matches:", matchError);
       }
 
       // Send initial online users list for user's matches
       const onlineMatchUsers = [];
-      userMatches.forEach((match) => {
-        const otherUserId = match.getOtherUser(userId).toString();
+      const userMatchesForOnline = await Match.find({
+        users: userId,
+        status: "active",
+      })
+        .select("_id users")
+        .lean()
+        .catch(() => []);
+
+      userMatchesForOnline.forEach((match) => {
+        const otherUserId = match.users
+          .find((id) => id.toString() !== userId)
+          .toString();
         if (onlineUsers.has(otherUserId)) {
           onlineMatchUsers.push({
             userId: otherUserId,
@@ -128,14 +171,22 @@ const socketHandler = (io) => {
 
       socket.emit("online_users", onlineMatchUsers);
 
-      // Send unread message summary
-      const unreadCount = await Message.getUnreadCount(userId);
-      socket.emit("unread_summary", { totalUnread: unreadCount });
+      // Send unread message summary with error handling
+      try {
+        const unreadCount = await Message.countDocuments({
+          receiver: userId,
+          readAt: null,
+          isDeleted: false,
+        });
+        socket.emit("unread_summary", { totalUnread: unreadCount });
+      } catch (unreadError) {
+        console.error("Error getting unread count:", unreadError);
+      }
     } catch (error) {
       console.error("❌ Error during socket connection setup:", error);
     }
 
-    // Handle joining a specific conversation
+    // Enhanced conversation joining with validation
     socket.on("join_conversation", async (data) => {
       try {
         const { matchId } = data;
@@ -150,8 +201,8 @@ const socketHandler = (io) => {
         );
 
         // Verify user is part of this match
-        const match = await Match.findById(matchId);
-        if (!match || !match.users.includes(userId)) {
+        const match = await Match.findById(matchId).select("users").lean();
+        if (!match || !match.users.some((id) => id.toString() === userId)) {
           socket.emit("error", {
             message: "Access denied to this conversation",
           });
@@ -169,8 +220,18 @@ const socketHandler = (io) => {
           userRooms.get(userId).add(roomName);
         }
 
-        // Mark messages as read when joining conversation
-        await Message.markConversationAsRead(matchId, userId);
+        // Mark messages as read when joining conversation (non-blocking)
+        Message.updateMany(
+          {
+            match: matchId,
+            receiver: userId,
+            readAt: null,
+            isDeleted: false,
+          },
+          { readAt: new Date() }
+        ).catch((err) => {
+          console.error("Error marking messages as read:", err);
+        });
 
         // Notify other user
         socket.to(roomName).emit("user_joined_conversation", {
@@ -183,9 +244,7 @@ const socketHandler = (io) => {
         // Send conversation metadata
         socket.emit("conversation_joined", {
           matchId,
-          conversationStarted: !!match.firstMessageSentAt,
-          timeToExpiration: match.timeToExpiration,
-          urgencyLevel: match.urgencyLevel,
+          timestamp: new Date(),
         });
       } catch (error) {
         console.error("❌ Error joining conversation:", error);
@@ -193,7 +252,7 @@ const socketHandler = (io) => {
       }
     });
 
-    // Handle leaving a conversation
+    // Enhanced conversation leaving
     socket.on("leave_conversation", (data) => {
       try {
         const { matchId } = data;
@@ -238,7 +297,7 @@ const socketHandler = (io) => {
       }
     });
 
-    // Enhanced typing indicators with timeout management
+    // Enhanced typing indicators with better timeout management
     socket.on("typing_start", (data) => {
       try {
         const { matchId } = data;
@@ -252,10 +311,13 @@ const socketHandler = (io) => {
 
         // Clear any existing typing timeout for this match
         if (typingUsers.has(matchId)) {
-          clearTimeout(typingUsers.get(matchId).timeout);
+          const existingTyping = typingUsers.get(matchId);
+          if (existingTyping.timeout) {
+            clearTimeout(existingTyping.timeout);
+          }
         }
 
-        // Set new typing status
+        // Set new typing status with auto-cleanup
         const typingTimeout = setTimeout(() => {
           typingUsers.delete(matchId);
           socket.to(roomName).emit("user_typing", {
@@ -294,7 +356,10 @@ const socketHandler = (io) => {
           typingUsers.has(matchId) &&
           typingUsers.get(matchId).userId === userId
         ) {
-          clearTimeout(typingUsers.get(matchId).timeout);
+          const typingData = typingUsers.get(matchId);
+          if (typingData.timeout) {
+            clearTimeout(typingData.timeout);
+          }
           typingUsers.delete(matchId);
 
           socket.to(roomName).emit("user_typing", {
@@ -320,7 +385,15 @@ const socketHandler = (io) => {
         }
 
         // Mark messages as read in database
-        const result = await Message.markConversationAsRead(matchId, userId);
+        const result = await Message.updateMany(
+          {
+            match: matchId,
+            receiver: userId,
+            readAt: null,
+            isDeleted: false,
+          },
+          { readAt: new Date() }
+        );
 
         if (result.modifiedCount > 0) {
           const roomName = `match_${matchId}`;
@@ -334,7 +407,12 @@ const socketHandler = (io) => {
           });
 
           // Update user's unread count
-          const newUnreadCount = await Message.getUnreadCount(userId);
+          const newUnreadCount = await Message.countDocuments({
+            receiver: userId,
+            readAt: null,
+            isDeleted: false,
+          });
+
           socket.emit("unread_count_updated", {
             totalUnread: newUnreadCount,
           });
@@ -345,14 +423,15 @@ const socketHandler = (io) => {
       }
     });
 
-    // Enhanced real-time message sending
+    // Enhanced real-time message sending with comprehensive validation
     socket.on("send_message", async (data) => {
       try {
-        const { matchId, content, messageType = "text" } = data;
+        const { matchId, content, messageType = "text", tempId } = data;
 
         if (!matchId || !content?.trim()) {
           socket.emit("error", {
             message: "Match ID and content are required",
+            tempId,
           });
           return;
         }
@@ -362,12 +441,13 @@ const socketHandler = (io) => {
         // Verify match and user permissions
         const match = await Match.findById(matchId).populate(
           "users",
-          "firstName lastName safety"
+          "firstName lastName safety settings"
         );
 
         if (!match || !match.users.find((u) => u._id.toString() === userId)) {
           socket.emit("error", {
             message: "Access denied to this conversation",
+            tempId,
           });
           return;
         }
@@ -376,14 +456,17 @@ const socketHandler = (io) => {
 
         // Check if users have blocked each other
         if (
-          user.safety.blockedUsers.includes(otherUser._id) ||
-          otherUser.safety.blockedUsers.includes(userId)
+          user.safety?.blockedUsers?.includes(otherUser._id) ||
+          otherUser.safety?.blockedUsers?.includes(userId)
         ) {
-          socket.emit("error", { message: "Cannot send message to this user" });
+          socket.emit("error", {
+            message: "Cannot send message to this user",
+            tempId,
+          });
           return;
         }
 
-        // Rate limiting check
+        // Enhanced rate limiting
         const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
         const recentMessageCount = await Message.countDocuments({
           sender: userId,
@@ -391,10 +474,22 @@ const socketHandler = (io) => {
           createdAt: { $gte: oneMinuteAgo },
         });
 
-        if (recentMessageCount >= 10) {
+        if (recentMessageCount >= 15) {
+          // Increased limit slightly
           socket.emit("error", {
             message: "Too many messages sent. Please slow down.",
             code: "RATE_LIMIT_EXCEEDED",
+            tempId,
+          });
+          return;
+        }
+
+        // Content filtering (basic)
+        const filteredContent = content.trim();
+        if (filteredContent.length > 1000) {
+          socket.emit("error", {
+            message: "Message too long. Maximum 1000 characters.",
+            tempId,
           });
           return;
         }
@@ -404,7 +499,7 @@ const socketHandler = (io) => {
           match: matchId,
           sender: userId,
           receiver: otherUser._id,
-          content: content.trim(),
+          content: filteredContent,
           messageType,
         });
 
@@ -413,10 +508,14 @@ const socketHandler = (io) => {
         // Update match activity
         const isFirstMessage = !match.firstMessageSentAt;
         if (isFirstMessage) {
-          await match.markFirstMessageSent(userId);
-        } else {
+          match.firstMessageSentAt = new Date();
+          match.firstMessageSentBy = userId;
+          match.conversationStarter = userId;
           match.lastActivity = new Date();
+          match.expiresAt = null; // Clear expiration
           await match.save();
+        } else {
+          await Match.findByIdAndUpdate(matchId, { lastActivity: new Date() });
         }
 
         // Populate sender info for response
@@ -446,11 +545,14 @@ const socketHandler = (io) => {
           typingUsers.has(matchId) &&
           typingUsers.get(matchId).userId === userId
         ) {
-          clearTimeout(typingUsers.get(matchId).timeout);
+          const typingData = typingUsers.get(matchId);
+          if (typingData.timeout) {
+            clearTimeout(typingData.timeout);
+          }
           typingUsers.delete(matchId);
         }
 
-        // Send push notification if other user is offline
+        // Send push notification if other user is offline and has notifications enabled
         const isOtherUserOnline = onlineUsers.has(otherUser._id.toString());
         if (!isOtherUserOnline && otherUser.settings?.notifications?.messages) {
           // TODO: Implement push notification service
@@ -468,7 +570,7 @@ const socketHandler = (io) => {
 
         // Confirm message sent to sender
         socket.emit("message_sent", {
-          tempId: data.tempId, // Client can send temp ID for optimistic updates
+          tempId: tempId,
           messageId: message._id,
           sentAt: message.createdAt,
         });
@@ -478,24 +580,6 @@ const socketHandler = (io) => {
           message: "Error sending message",
           tempId: data.tempId,
         });
-      }
-    });
-
-    // Handle match notifications
-    socket.on("new_match_notification", (data) => {
-      try {
-        const { matchId, otherUserId } = data;
-
-        if (onlineUsers.has(otherUserId)) {
-          const otherUserSocket = onlineUsers.get(otherUserId).socketId;
-          io.to(otherUserSocket).emit("new_match", {
-            matchId,
-            user: onlineUsers.get(userId).user,
-            matchedAt: new Date(),
-          });
-        }
-      } catch (error) {
-        console.error("❌ Error sending match notification:", error);
       }
     });
 
@@ -509,8 +593,14 @@ const socketHandler = (io) => {
           onlineUsers.get(userId).lastSeen = new Date();
 
           // Notify all matches about status change
-          const userMatches = await Match.findForUser(userId);
-          userMatches.forEach((match) => {
+          const userMatchesForStatus = await Match.find({
+            users: userId,
+            status: "active",
+          })
+            .select("_id")
+            .lean();
+
+          userMatchesForStatus.forEach((match) => {
             const roomName = `match_${match._id}`;
             socket.to(roomName).emit("user_status_changed", {
               userId,
@@ -534,18 +624,30 @@ const socketHandler = (io) => {
       }
     });
 
-    // Enhanced disconnect handler
+    // Enhanced disconnect handler with comprehensive cleanup
     socket.on("disconnect", async (reason) => {
       console.log(`👋 User ${user.firstName} disconnected: ${reason}`);
 
       try {
-        // Update user's last active timestamp
-        await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+        // Clear any connection cleanup timer
+        if (connectionCleanupTimers.has(socket.id)) {
+          clearTimeout(connectionCleanupTimers.get(socket.id));
+          connectionCleanupTimers.delete(socket.id);
+        }
+
+        // Update user's last active timestamp (non-blocking)
+        User.findByIdAndUpdate(userId, { lastActive: new Date() }).catch(
+          (err) => {
+            console.error("Error updating lastActive on disconnect:", err);
+          }
+        );
 
         // Clean up typing indicators
         for (const [matchId, typingData] of typingUsers.entries()) {
           if (typingData.userId === userId) {
-            clearTimeout(typingData.timeout);
+            if (typingData.timeout) {
+              clearTimeout(typingData.timeout);
+            }
             typingUsers.delete(matchId);
 
             // Notify other users that this user stopped typing
@@ -578,13 +680,13 @@ const socketHandler = (io) => {
       }
     });
 
-    // Handle errors
+    // Handle socket errors
     socket.on("error", (error) => {
       console.error(`❌ Socket error for user ${user.firstName}:`, error);
     });
   });
 
-  // Utility functions for external use
+  // Enhanced utility functions for external use
   io.getOnlineUsers = () => {
     return Array.from(onlineUsers.entries()).map(([userId, data]) => ({
       userId,
@@ -633,8 +735,8 @@ const socketHandler = (io) => {
     io.emit(event, data);
   };
 
-  // Periodic cleanup of stale data
-  setInterval(() => {
+  // Enhanced periodic cleanup of stale data
+  const cleanupInterval = setInterval(() => {
     const now = Date.now();
     const fiveMinutesAgo = now - 5 * 60 * 1000;
 
@@ -642,7 +744,9 @@ const socketHandler = (io) => {
     for (const [matchId, typingData] of typingUsers.entries()) {
       if (now - typingData.startedAt.getTime() > 10000) {
         // 10 seconds
-        clearTimeout(typingData.timeout);
+        if (typingData.timeout) {
+          clearTimeout(typingData.timeout);
+        }
         typingUsers.delete(matchId);
       }
     }
@@ -655,16 +759,43 @@ const socketHandler = (io) => {
         userRooms.delete(userId);
       }
     }
+
+    // Clean up old connection cleanup timers
+    for (const [socketId, timerId] of connectionCleanupTimers.entries()) {
+      // If timer is very old, clear it
+      clearTimeout(timerId);
+      connectionCleanupTimers.delete(socketId);
+    }
   }, 60000); // Run every minute
+
+  // Cleanup interval on server shutdown
+  process.on("SIGTERM", () => {
+    clearInterval(cleanupInterval);
+
+    // Clear all timeouts
+    for (const [, typingData] of typingUsers.entries()) {
+      if (typingData.timeout) {
+        clearTimeout(typingData.timeout);
+      }
+    }
+
+    for (const [, timerId] of connectionCleanupTimers.entries()) {
+      clearTimeout(timerId);
+    }
+  });
 
   console.log("✅ Enhanced Socket.io handler setup complete");
 
   // Log statistics periodically
-  setInterval(() => {
+  const statsInterval = setInterval(() => {
     console.log(
-      `📊 Socket Stats - Online Users: ${onlineUsers.size}, Active Typing: ${typingUsers.size}`
+      `📊 Socket Stats - Online Users: ${onlineUsers.size}, Active Typing: ${typingUsers.size}, Rooms: ${userRooms.size}`
     );
   }, 300000); // Every 5 minutes
+
+  process.on("SIGTERM", () => {
+    clearInterval(statsInterval);
+  });
 };
 
 module.exports = socketHandler;
