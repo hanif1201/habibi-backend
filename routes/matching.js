@@ -36,16 +36,70 @@ router.get("/discover", authenticate, async (req, res) => {
     const swipedUserIds = await Swipe.getSwipedUserIds(currentUser._id);
 
     // Get current user's matches to exclude them
-    const matches = await Match.findForUser(currentUser._id);
-    const matchedUserIds = matches.map((match) =>
-      match.getOtherUser(currentUser._id)
-    );
+    const matches = await Match.find({
+      users: currentUser._id,
+      status: "active",
+    }).select("users");
+
+    const matchedUserIds = [];
+    matches.forEach((match) => {
+      match.users.forEach((userId) => {
+        if (userId.toString() !== currentUser._id.toString()) {
+          matchedUserIds.push(userId);
+        }
+      });
+    });
 
     // Build exclusion list
-    const excludeIds = [...swipedUserIds, ...matchedUserIds];
+    const excludeIds = [
+      currentUser._id,
+      ...swipedUserIds,
+      ...matchedUserIds,
+      ...(currentUser.safety?.blockedUsers || []),
+    ];
 
-    // Find potential matches using the User model method
-    let potentialMatches = await User.findForDiscovery(currentUser, excludeIds);
+    // Build discovery query
+    let discoveryQuery = {
+      _id: { $nin: excludeIds },
+      isActive: true,
+      photos: { $exists: true, $not: { $size: 0 } },
+      "safety.blockedUsers": { $nin: [currentUser._id] },
+    };
+
+    // Add preference filters
+    if (
+      currentUser.preferences?.interestedIn &&
+      currentUser.preferences.interestedIn !== "both"
+    ) {
+      discoveryQuery.gender = currentUser.preferences.interestedIn;
+    }
+
+    // Age range filter
+    if (currentUser.preferences?.ageRange) {
+      const currentDate = new Date();
+      const maxBirthDate = new Date(
+        currentDate.getFullYear() - currentUser.preferences.ageRange.min,
+        currentDate.getMonth(),
+        currentDate.getDate()
+      );
+      const minBirthDate = new Date(
+        currentDate.getFullYear() - currentUser.preferences.ageRange.max - 1,
+        currentDate.getMonth(),
+        currentDate.getDate()
+      );
+
+      discoveryQuery.dateOfBirth = {
+        $gte: minBirthDate,
+        $lte: maxBirthDate,
+      };
+    }
+
+    // Find potential matches
+    let potentialMatches = await User.find(discoveryQuery)
+      .select(
+        "firstName lastName bio dateOfBirth gender photos location preferences verification lastActive"
+      )
+      .limit(20);
 
     // Filter by mutual interest
     potentialMatches = potentialMatches.filter((user) => {
@@ -70,16 +124,19 @@ router.get("/discover", authenticate, async (req, res) => {
     }
 
     // Calculate compatibility scores and enhance user data
-    potentialMatches = potentialMatches.map((user) => ({
-      ...user.toObject(),
-      age: calculateAge(user.dateOfBirth),
-      distance: calculateUserDistance(currentUser, user),
-      compatibilityScore: calculateCompatibilityScore(currentUser, user),
-      primaryPhoto:
-        user.photos?.find((photo) => photo.isPrimary) || user.photos?.[0],
-      isOnline: isUserRecentlyActive(user.lastActive),
-      verification: user.verification || { isVerified: false },
-    }));
+    potentialMatches = potentialMatches.map((user) => {
+      const userObj = user.toObject();
+      return {
+        ...userObj,
+        age: calculateAge(user.dateOfBirth),
+        distance: calculateUserDistance(currentUser, user),
+        compatibilityScore: calculateCompatibilityScore(currentUser, user),
+        primaryPhoto:
+          user.photos?.find((photo) => photo.isPrimary) || user.photos?.[0],
+        isOnline: isUserRecentlyActive(user.lastActive),
+        verification: user.verification || { isVerified: false },
+      };
+    });
 
     // Sort by compatibility score and activity
     potentialMatches.sort((a, b) => {
@@ -140,9 +197,128 @@ router.get("/discover", authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error finding potential matches",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 });
+
+// Helper function to check mutual interest
+function isMutualInterest(user1, user2) {
+  // Check if user2 would be interested in user1
+  if (
+    user2.preferences?.interestedIn &&
+    user2.preferences.interestedIn !== "both"
+  ) {
+    if (user2.preferences.interestedIn !== user1.gender) {
+      return false;
+    }
+  }
+
+  // Check age preference of user2
+  if (user2.preferences?.ageRange) {
+    const user1Age = calculateAge(user1.dateOfBirth);
+    if (
+      user1Age < user2.preferences.ageRange.min ||
+      user1Age > user2.preferences.ageRange.max
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// Helper function to calculate age
+function calculateAge(dateOfBirth) {
+  if (!dateOfBirth) return 0;
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+
+  if (
+    monthDiff < 0 ||
+    (monthDiff === 0 && today.getDate() < birthDate.getDate())
+  ) {
+    age--;
+  }
+  return age;
+}
+
+// Helper function to calculate distance between coordinates
+function calculateDistance(coords1, coords2) {
+  const [lon1, lat1] = coords1;
+  const [lon2, lat2] = coords2;
+
+  const R = 6371; // Earth's radius in kilometers
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// Helper function to calculate distance between users
+function calculateUserDistance(user1, user2) {
+  if (!user1.location?.coordinates || !user2.location?.coordinates) {
+    return null;
+  }
+  return Math.round(
+    calculateDistance(user1.location.coordinates, user2.location.coordinates)
+  );
+}
+
+// Helper function to calculate compatibility score
+function calculateCompatibilityScore(user1, user2) {
+  let score = 50; // Base score
+
+  // Age compatibility (closer ages = higher score)
+  const ageDiff = Math.abs(
+    calculateAge(user1.dateOfBirth) - calculateAge(user2.dateOfBirth)
+  );
+  if (ageDiff <= 3) score += 20;
+  else if (ageDiff <= 5) score += 15;
+  else if (ageDiff <= 10) score += 10;
+
+  // Bio similarity (if both have bios)
+  if (
+    user1.bio &&
+    user2.bio &&
+    user1.bio.length > 20 &&
+    user2.bio.length > 20
+  ) {
+    score += 15;
+  }
+
+  // Photo count (more photos = more serious)
+  if (user2.photos && user2.photos.length >= 3) {
+    score += 10;
+  }
+
+  // Verification status
+  if (user2.verification?.isVerified) {
+    score += 15;
+  }
+
+  // Recent activity
+  if (isUserRecentlyActive(user2.lastActive)) {
+    score += 10;
+  }
+
+  return Math.min(100, score);
+}
+
+// Helper function to check if user is recently active
+function isUserRecentlyActive(lastActive) {
+  if (!lastActive) return false;
+  const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+  return new Date(lastActive) > fifteenMinutesAgo;
+}
 
 // @route   POST /api/matching/swipe
 // @desc    Enhanced swipe with analytics and premium features

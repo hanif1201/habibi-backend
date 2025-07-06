@@ -448,7 +448,7 @@ UserSchema.methods.reportUser = function (userId, reason) {
   return Promise.resolve(this);
 };
 
-// Static method to find users for discovery
+// Static method to find users for discovery (FIXED)
 UserSchema.statics.findForDiscovery = function (currentUser, excludeIds = []) {
   const query = {
     _id: {
@@ -459,7 +459,6 @@ UserSchema.statics.findForDiscovery = function (currentUser, excludeIds = []) {
       ],
     },
     isActive: true,
-    "preferences.showMe": true,
     photos: { $exists: true, $not: { $size: 0 } },
     "safety.blockedUsers": { $nin: [currentUser._id] },
   };
@@ -496,5 +495,4 @@ UserSchema.statics.findForDiscovery = function (currentUser, excludeIds = []) {
     "firstName lastName bio dateOfBirth gender photos location preferences verification lastActive"
   );
 };
-
 module.exports = mongoose.model("User", UserSchema);
