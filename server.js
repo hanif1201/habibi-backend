@@ -1,5 +1,3 @@
-// ===== server.js - Enhanced Security & Error Handling =====
-
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -9,18 +7,16 @@ const dotenv = require("dotenv");
 const rateLimit = require("express-rate-limit");
 const helmet = require("helmet");
 const compression = require("compression");
-const validator = require("validator");
 const mongoSanitize = require("express-mongo-sanitize");
 const xss = require("xss-clean");
+const cron = require("node-cron");
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
 
-// ===== ENHANCED SECURITY MIDDLEWARE =====
-
-// Security headers
+// ===== SECURITY MIDDLEWARE =====
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -33,19 +29,15 @@ app.use(
         connectSrc: ["'self'", "ws:", "wss:"],
       },
     },
-    crossOriginEmbedderPolicy: false, // For socket.io compatibility
+    crossOriginEmbedderPolicy: false,
   })
 );
 
 app.use(compression());
-
-// Data sanitization against NoSQL injection
 app.use(mongoSanitize());
-
-// Data sanitization against XSS
 app.use(xss());
 
-// Enhanced rate limiting
+// Rate limiting
 const createRateLimit = (windowMs, max, message) =>
   rateLimit({
     windowMs,
@@ -53,38 +45,29 @@ const createRateLimit = (windowMs, max, message) =>
     message: { success: false, message },
     standardHeaders: true,
     legacyHeaders: false,
-    handler: (req, res) => {
-      console.log(`Rate limit exceeded for IP: ${req.ip}, Path: ${req.path}`);
-      res.status(429).json({
-        success: false,
-        message,
-        retryAfter: Math.round(windowMs / 1000),
-      });
-    },
   });
 
-// Different rate limits for different endpoints
 const generalLimiter = createRateLimit(
-  15 * 60 * 1000, // 15 minutes
-  100, // requests per window
+  15 * 60 * 1000,
+  100,
   "Too many requests from this IP, please try again later."
 );
 
 const authLimiter = createRateLimit(
-  15 * 60 * 1000, // 15 minutes
-  5, // requests per window
+  15 * 60 * 1000,
+  5,
   "Too many authentication attempts, please try again later."
 );
 
 const uploadLimiter = createRateLimit(
-  60 * 60 * 1000, // 1 hour
-  10, // requests per window
+  60 * 60 * 1000,
+  10,
   "Too many upload attempts, please try again later."
 );
 
 const messageLimiter = createRateLimit(
-  1 * 60 * 1000, // 1 minute
-  30, // requests per window
+  1 * 60 * 1000,
+  30,
   "Too many messages sent, please slow down."
 );
 
@@ -94,798 +77,37 @@ app.use("/api/photos", uploadLimiter);
 app.use("/api/chat", messageLimiter);
 app.use("/api/", generalLimiter);
 
-// ===== INPUT VALIDATION MIDDLEWARE =====
-
-const validateInput = (req, res, next) => {
-  // Sanitize all string inputs
-  const sanitizeObject = (obj) => {
-    for (let key in obj) {
-      if (typeof obj[key] === "string") {
-        // Basic XSS protection
-        obj[key] = validator.escape(obj[key].trim());
-        // Remove potential script tags
-        obj[key] = obj[key].replace(
-          /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
-          ""
-        );
-      } else if (typeof obj[key] === "object" && obj[key] !== null) {
-        sanitizeObject(obj[key]);
-      }
-    }
-  };
-
-  if (req.body && typeof req.body === "object") {
-    sanitizeObject(req.body);
-  }
-
-  next();
-};
-
-// ===== PASSWORD STRENGTH VALIDATION =====
-
-const validatePassword = (password) => {
-  const errors = [];
-
-  if (password.length < 8) {
-    errors.push("Password must be at least 8 characters long");
-  }
-  if (!/[A-Z]/.test(password)) {
-    errors.push("Password must contain at least one uppercase letter");
-  }
-  if (!/[a-z]/.test(password)) {
-    errors.push("Password must contain at least one lowercase letter");
-  }
-  if (!/\d/.test(password)) {
-    errors.push("Password must contain at least one number");
-  }
-  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
-    errors.push("Password must contain at least one special character");
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors,
-  };
-};
-
-// ===== ENHANCED ERROR HANDLING =====
-
-class AppError extends Error {
-  constructor(message, statusCode) {
-    super(message);
-    this.statusCode = statusCode;
-    this.isOperational = true;
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
-
-const handleCastErrorDB = (err) => {
-  const message = `Invalid ${err.path}: ${err.value}`;
-  return new AppError(message, 400);
-};
-
-const handleDuplicateFieldsDB = (err) => {
-  const value = err.errmsg.match(/(["'])(\\?.)*?\1/)[0];
-  const message = `Duplicate field value: ${value}. Please use another value!`;
-  return new AppError(message, 400);
-};
-
-const handleValidationErrorDB = (err) => {
-  const errors = Object.values(err.errors).map((el) => el.message);
-  const message = `Invalid input data. ${errors.join(". ")}`;
-  return new AppError(message, 400);
-};
-
-const handleJWTError = () =>
-  new AppError("Invalid token. Please log in again!", 401);
-
-const handleJWTExpiredError = () =>
-  new AppError("Your token has expired! Please log in again.", 401);
-
-const sendErrorDev = (err, res) => {
-  res.status(err.statusCode).json({
-    success: false,
-    error: err,
-    message: err.message,
-    stack: err.stack,
-  });
-};
-
-const sendErrorProd = (err, res) => {
-  // Operational errors: send message to client
-  if (err.isOperational) {
-    res.status(err.statusCode).json({
-      success: false,
-      message: err.message,
-    });
-  } else {
-    // Programming errors: don't leak error details
-    console.error("ERROR 💥", err);
-    res.status(500).json({
-      success: false,
-      message: "Something went wrong!",
-    });
-  }
-};
-
-// ===== ENHANCED AUTH MIDDLEWARE =====
-
-const authenticate = async (req, res, next) => {
-  try {
-    // Get token from header
-    const authHeader = req.header("Authorization");
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({
-        success: false,
-        message: "Access denied. No valid token provided.",
-      });
-    }
-
-    const token = authHeader.substring(7);
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Access denied. No token provided.",
-      });
-    }
-
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    // Check if user still exists
-    const User = require("./models/User");
-    const user = await User.findById(decoded.userId).select("-password");
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "The user belonging to this token no longer exists.",
-      });
-    }
-
-    // Check if user is active
-    if (!user.isActive) {
-      return res.status(401).json({
-        success: false,
-        message: "Your account has been deactivated. Please contact support.",
-      });
-    }
-
-    // Check if user changed password after the token was issued
-    if (
-      user.passwordChangedAt &&
-      decoded.iat < user.passwordChangedAt.getTime() / 1000
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "User recently changed password. Please log in again.",
-      });
-    }
-
-    // Grant access to protected route
-    req.user = user;
-    next();
-  } catch (error) {
-    console.error("Auth middleware error:", error);
-
-    if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid token. Please log in again.",
-      });
-    }
-
-    if (error.name === "TokenExpiredError") {
-      return res.status(401).json({
-        success: false,
-        message: "Your token has expired. Please log in again.",
-      });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Authentication error occurred.",
-    });
-  }
-};
-
-// ===== ENHANCED MATCHING ALGORITHM =====
-
-// Fix age calculation with timezone handling
-const calculateAge = (dateOfBirth) => {
-  if (!dateOfBirth) return 0;
-
-  const today = new Date();
-  const birth = new Date(dateOfBirth);
-
-  // Use UTC to avoid timezone issues
-  const todayUTC = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate()
-  );
-  const birthUTC = new Date(
-    birth.getFullYear(),
-    birth.getMonth(),
-    birth.getDate()
-  );
-
-  let age = todayUTC.getFullYear() - birthUTC.getFullYear();
-  const monthDiff = todayUTC.getMonth() - birthUTC.getMonth();
-
-  if (
-    monthDiff < 0 ||
-    (monthDiff === 0 && todayUTC.getDate() < birthUTC.getDate())
-  ) {
-    age--;
-  }
-  return age;
-};
-
-// Enhanced distance calculation with better precision
-const calculateDistance = (coords1, coords2) => {
-  const [lon1, lat1] = coords1;
-  const [lon2, lat2] = coords2;
-
-  const R = 6371; // Earth's radius in kilometers
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c * 100) / 100; // Round to 2 decimal places
-};
-
-// ===== ENHANCED SOCKET HANDLER =====
-
-const socketHandler = (io) => {
-  console.log("🔌 Enhanced Socket.io handler initialized");
-
-  // Store active connections with better tracking
-  const activeConnections = new Map();
-  const userSockets = new Map(); // userId -> Set of socketIds
-  const typingUsers = new Map(); // matchId -> { userId, userName, timestamp }
-  const userRooms = new Map(); // userId -> Set of room names
-
-  // Enhanced middleware for socket authentication
-  io.use(async (socket, next) => {
-    try {
-      const token = socket.handshake.auth.token;
-
-      if (!token) {
-        console.log("❌ Socket auth failed: No token provided");
-        return next(new Error("Authentication error: No token provided"));
-      }
-
-      // Verify JWT token with enhanced validation
-      const jwt = require("jsonwebtoken");
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      // Get user from database
-      const User = require("../models/User");
-      const user = await User.findById(decoded.userId).select("+safety");
-
-      if (!user || !user.isActive) {
-        console.log(
-          "❌ Socket auth failed: User not found or inactive:",
-          decoded.userId
-        );
-        return next(new Error("User not found or inactive"));
-      }
-
-      // Check for account lockout
-      if (user.isLocked) {
-        return next(new Error("Account is temporarily locked"));
-      }
-
-      // Attach user data to socket
-      socket.userId = user._id.toString();
-      socket.user = {
-        _id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        photos: user.photos,
-        safety: user.safety,
-        settings: user.settings,
-      };
-
-      console.log(`✅ Socket authenticated: ${user.firstName} (${user._id})`);
-      next();
-    } catch (error) {
-      console.log("❌ Socket auth error:", error.message);
-
-      if (error.name === "JsonWebTokenError") {
-        next(new Error("Invalid token"));
-      } else if (error.name === "TokenExpiredError") {
-        next(new Error("Token expired"));
-      } else {
-        next(new Error("Authentication failed"));
-      }
-    }
-  });
-
-  // Connection handling with better cleanup
-  io.on("connection", async (socket) => {
-    const userId = socket.userId;
-    const user = socket.user;
-
-    console.log(`👤 User ${user.firstName} connected: ${socket.id}`);
-
-    try {
-      // Track connection
-      activeConnections.set(socket.id, {
-        userId,
-        user,
-        connectedAt: new Date(),
-        lastActivity: new Date(),
-      });
-
-      // Track user sockets (handle multiple tabs/devices)
-      if (!userSockets.has(userId)) {
-        userSockets.set(userId, new Set());
-      }
-      userSockets.get(userId).add(socket.id);
-
-      // Initialize user rooms tracking
-      userRooms.set(userId, new Set());
-
-      // Update user's last active timestamp
-      const User = require("../models/User");
-      await User.findByIdAndUpdate(userId, {
-        lastActive: new Date(),
-        $inc: { "stats.profileViews": 1 },
-      });
-
-      // Join user to their match rooms
-      const Match = require("../models/Match");
-      const userMatches = await Match.findForUser(userId);
-
-      for (const match of userMatches) {
-        const roomName = `match_${match._id}`;
-        socket.join(roomName);
-        userRooms.get(userId).add(roomName);
-
-        console.log(`🏠 User ${user.firstName} joined room: ${roomName}`);
-
-        // Notify other user in the match that this user is online
-        const otherUserId = match.getOtherUser(userId);
-        socket.to(roomName).emit("user_online", {
-          userId,
-          user: { _id: userId, firstName: user.firstName },
-          matchId: match._id,
-          timestamp: new Date(),
-        });
-      }
-
-      // Send connection confirmation
-      socket.emit("connection_confirmed", {
-        message: "Successfully connected to Habibi chat",
-        userId,
-        timestamp: new Date(),
-      });
-    } catch (error) {
-      console.error("❌ Error during socket connection setup:", error);
-      socket.emit("error", { message: "Connection setup failed" });
-    }
-
-    // Enhanced message sending with validation and rate limiting
-    socket.on("send_message", async (data) => {
-      try {
-        const { matchId, content, messageType = "text", tempId } = data;
-
-        // Input validation
-        if (!matchId || !content?.trim()) {
-          socket.emit("error", {
-            message: "Match ID and content are required",
-            tempId,
-          });
-          return;
-        }
-
-        // Content length validation
-        if (content.trim().length > 1000) {
-          socket.emit("error", {
-            message: "Message too long (max 1000 characters)",
-            tempId,
-          });
-          return;
-        }
-
-        // Rate limiting check
-        const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
-        const Message = require("../models/Message");
-        const recentMessageCount = await Message.countDocuments({
-          sender: userId,
-          match: matchId,
-          createdAt: { $gte: oneMinuteAgo },
-        });
-
-        if (recentMessageCount >= 10) {
-          socket.emit("error", {
-            message: "Too many messages sent. Please slow down.",
-            code: "RATE_LIMIT_EXCEEDED",
-            tempId,
-          });
-          return;
-        }
-
-        // Verify match and user permissions
-        const Match = require("../models/Match");
-        const match = await Match.findById(matchId).populate(
-          "users",
-          "firstName lastName safety"
-        );
-
-        if (!match || !match.users.find((u) => u._id.toString() === userId)) {
-          socket.emit("error", {
-            message: "Access denied to this conversation",
-            tempId,
-          });
-          return;
-        }
-
-        const otherUser = match.users.find((u) => u._id.toString() !== userId);
-
-        // Check if users have blocked each other
-        if (
-          user.safety.blockedUsers.includes(otherUser._id) ||
-          otherUser.safety.blockedUsers.includes(userId)
-        ) {
-          socket.emit("error", {
-            message: "Cannot send message to this user",
-            tempId,
-          });
-          return;
-        }
-
-        // Content filtering
-        const filteredContent = content
-          .trim()
-          .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
-          .replace(/javascript:/gi, "")
-          .replace(/on\w+\s*=/gi, "");
-
-        // Create and save message
-        const message = new Message({
-          match: matchId,
-          sender: userId,
-          receiver: otherUser._id,
-          content: filteredContent,
-          messageType,
-        });
-
-        await message.save();
-
-        // Update match activity
-        const isFirstMessage = !match.firstMessageSentAt;
-        if (isFirstMessage) {
-          await match.markFirstMessageSent(userId);
-        } else {
-          match.lastActivity = new Date();
-          await match.save();
-        }
-
-        // Populate sender info for response
-        await message.populate("sender", "firstName lastName photos");
-
-        const formattedMessage = {
-          _id: message._id,
-          content: message.content,
-          sender: {
-            _id: message.sender._id,
-            firstName: message.sender.firstName,
-            lastName: message.sender.lastName,
-          },
-          createdAt: message.createdAt,
-          messageType: message.messageType,
-          matchId,
-          receiverId: otherUser._id,
-          isFirstMessage,
-        };
-
-        // Send to all users in the match room
-        const roomName = `match_${matchId}`;
-        io.to(roomName).emit("new_message", formattedMessage);
-
-        // Clear typing indicator
-        if (
-          typingUsers.has(matchId) &&
-          typingUsers.get(matchId).userId === userId
-        ) {
-          typingUsers.delete(matchId);
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }
-
-        // Update last activity
-        if (activeConnections.has(socket.id)) {
-          activeConnections.get(socket.id).lastActivity = new Date();
-        }
-
-        // Confirm message sent
-        socket.emit("message_sent", {
-          tempId,
-          messageId: message._id,
-          sentAt: message.createdAt,
-        });
-      } catch (error) {
-        console.error("❌ Socket message send error:", error);
-        socket.emit("error", {
-          message: "Error sending message",
-          tempId: data.tempId,
-        });
-      }
-    });
-
-    // Enhanced disconnect handler with proper cleanup
-    socket.on("disconnect", async (reason) => {
-      console.log(`👋 User ${user.firstName} disconnected: ${reason}`);
-
-      try {
-        // Update user's last active timestamp
-        await User.findByIdAndUpdate(userId, { lastActive: new Date() });
-
-        // Clean up connection tracking
-        activeConnections.delete(socket.id);
-
-        // Remove socket from user's socket set
-        if (userSockets.has(userId)) {
-          userSockets.get(userId).delete(socket.id);
-
-          // If no more sockets for this user, clean up completely
-          if (userSockets.get(userId).size === 0) {
-            userSockets.delete(userId);
-
-            // Clean up typing indicators
-            for (const [matchId, typingData] of typingUsers.entries()) {
-              if (typingData.userId === userId) {
-                typingUsers.delete(matchId);
-                const roomName = `match_${matchId}`;
-                socket.to(roomName).emit("user_typing", {
-                  userId,
-                  userName: user.firstName,
-                  matchId,
-                  isTyping: false,
-                });
-              }
-            }
-
-            // Notify matches that user went offline
-            const userRoomsList = userRooms.get(userId) || new Set();
-            userRoomsList.forEach((roomName) => {
-              socket.to(roomName).emit("user_offline", {
-                userId,
-                user: { _id: userId, firstName: user.firstName },
-                lastSeen: new Date(),
-                timestamp: new Date(),
-              });
-            });
-
-            userRooms.delete(userId);
-          }
-        }
-      } catch (error) {
-        console.error("❌ Error during disconnect cleanup:", error);
-      }
-    });
-
-    // Error handling
-    socket.on("error", (error) => {
-      console.error(`❌ Socket error for user ${user.firstName}:`, error);
-
-      // Log error for monitoring
-      if (process.env.NODE_ENV === "production") {
-        // Send to error monitoring service (Sentry, etc.)
-        console.error("Socket Error:", {
-          userId,
-          socketId: socket.id,
-          error: error.message,
-          timestamp: new Date(),
-        });
-      }
-    });
-
-    // Enhanced typing indicators with cleanup
-    socket.on("typing_start", (data) => {
-      try {
-        const { matchId } = data;
-
-        if (!matchId) {
-          socket.emit("error", { message: "Match ID is required" });
-          return;
-        }
-
-        const roomName = `match_${matchId}`;
-
-        // Clear any existing typing timeout for this match
-        if (typingUsers.has(matchId)) {
-          clearTimeout(typingUsers.get(matchId).timeout);
-        }
-
-        // Set new typing status with auto-cleanup
-        const typingTimeout = setTimeout(() => {
-          typingUsers.delete(matchId);
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }, 3000);
-
-        typingUsers.set(matchId, {
-          userId,
-          userName: user.firstName,
-          timeout: typingTimeout,
-          startedAt: new Date(),
-        });
-
-        socket.to(roomName).emit("user_typing", {
-          userId,
-          userName: user.firstName,
-          matchId,
-          isTyping: true,
-        });
-
-        // Update last activity
-        if (activeConnections.has(socket.id)) {
-          activeConnections.get(socket.id).lastActivity = new Date();
-        }
-      } catch (error) {
-        console.error("❌ Error handling typing start:", error);
-      }
-    });
-
-    socket.on("typing_stop", (data) => {
-      try {
-        const { matchId } = data;
-        const roomName = `match_${matchId}`;
-
-        // Clear typing status
-        if (
-          typingUsers.has(matchId) &&
-          typingUsers.get(matchId).userId === userId
-        ) {
-          clearTimeout(typingUsers.get(matchId).timeout);
-          typingUsers.delete(matchId);
-
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }
-      } catch (error) {
-        console.error("❌ Error handling typing stop:", error);
-      }
-    });
-  });
-
-  // Utility functions for external use with enhanced functionality
-  io.getOnlineUsers = () => {
-    const onlineUsers = [];
-    for (const [socketId, connection] of activeConnections.entries()) {
-      onlineUsers.push({
-        userId: connection.userId,
-        user: connection.user,
-        connectedAt: connection.connectedAt,
-        lastActivity: connection.lastActivity,
-      });
-    }
-    return onlineUsers;
-  };
-
-  io.getOnlineUserCount = () => {
-    return new Set(
-      Array.from(activeConnections.values()).map((conn) => conn.userId)
-    ).size;
-  };
-
-  io.isUserOnline = (userId) => {
-    return userSockets.has(userId) && userSockets.get(userId).size > 0;
-  };
-
-  io.getUserConnectionCount = (userId) => {
-    return userSockets.has(userId) ? userSockets.get(userId).size : 0;
-  };
-
-  io.sendToUser = (userId, event, data) => {
-    if (userSockets.has(userId)) {
-      const socketIds = userSockets.get(userId);
-      let sent = 0;
-      for (const socketId of socketIds) {
-        io.to(socketId).emit(event, data);
-        sent++;
-      }
-      return sent > 0;
-    }
-    return false;
-  };
-
-  io.sendToMatch = (matchId, event, data) => {
-    io.to(`match_${matchId}`).emit(event, data);
-  };
-
-  io.broadcastToAllUsers = (event, data) => {
-    io.emit(event, data);
-  };
-
-  // Enhanced periodic cleanup with better monitoring
-  setInterval(() => {
-    const now = Date.now();
-    const fiveMinutesAgo = now - 5 * 60 * 1000;
-    const thirtySecondsAgo = now - 30 * 1000;
-
-    // Clean up old typing indicators
-    for (const [matchId, typingData] of typingUsers.entries()) {
-      if (now - typingData.startedAt.getTime() > 10000) {
-        clearTimeout(typingData.timeout);
-        typingUsers.delete(matchId);
-      }
-    }
-
-    // Clean up stale connections
-    for (const [socketId, connection] of activeConnections.entries()) {
-      if (connection.lastActivity.getTime() < fiveMinutesAgo) {
-        console.log(
-          `🧹 Cleaning up stale connection for user ${connection.userId}`
-        );
-        activeConnections.delete(socketId);
-
-        // Clean up user socket tracking
-        if (userSockets.has(connection.userId)) {
-          userSockets.get(connection.userId).delete(socketId);
-          if (userSockets.get(connection.userId).size === 0) {
-            userSockets.delete(connection.userId);
-            userRooms.delete(connection.userId);
-          }
-        }
-      }
-    }
-
-    // Log statistics
-    const uniqueUsers = new Set(
-      Array.from(activeConnections.values()).map((conn) => conn.userId)
-    ).size;
-    console.log(
-      `📊 Socket Stats - Active Connections: ${activeConnections.size}, Unique Users: ${uniqueUsers}, Typing: ${typingUsers.size}`
-    );
-  }, 60000); // Run every minute
-
-  console.log("✅ Enhanced Socket.io handler setup complete");
-};
-
-// ===== ENHANCED DATABASE CONNECTION =====
-
+// ===== BODY PARSING =====
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// ===== CORS =====
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+    ],
+  })
+);
+
+// ===== DATABASE CONNECTION =====
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(
-      process.env.MONGODB_URI || "mongodb://localhost:27017/habibi",
-      {
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 5000,
-        socketTimeoutMS: 45000,
-        bufferCommands: false,
-      }
-    );
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      bufferCommands: false,
+    });
 
     console.log(`✅ MongoDB connected: ${conn.connection.host}`);
-
-    // Create indexes for better performance
-    await createDatabaseIndexes();
 
     // Handle connection events
     mongoose.connection.on("error", (err) => {
@@ -905,199 +127,303 @@ const connectDB = async () => {
   }
 };
 
-// Create database indexes for performance
-const createDatabaseIndexes = async () => {
-  try {
-    const User = require("./models/User");
-    const Match = require("./models/Match");
-    const Message = require("./models/Message");
-    const Swipe = require("./models/Swipe");
+// ===== SOCKET.IO HANDLER =====
+const socketHandler = (io) => {
+  const activeConnections = new Map();
+  const userSockets = new Map();
+  const typingUsers = new Map();
+  const userRooms = new Map();
 
-    // User indexes
-    await User.collection.createIndex({ email: 1 }, { unique: true });
-    await User.collection.createIndex({ location: "2dsphere" });
-    await User.collection.createIndex({ isActive: 1, lastActive: -1 });
-    await User.collection.createIndex({
-      "preferences.interestedIn": 1,
-      gender: 1,
-    });
-    await User.collection.createIndex({ dateOfBirth: 1 });
-
-    // Match indexes
-    await Match.collection.createIndex({ users: 1 });
-    await Match.collection.createIndex({ status: 1, matchedAt: -1 });
-    await Match.collection.createIndex({ expiresAt: 1 });
-
-    // Message indexes
-    await Message.collection.createIndex({ match: 1, createdAt: -1 });
-    await Message.collection.createIndex({ sender: 1, createdAt: -1 });
-    await Message.collection.createIndex({ receiver: 1, readAt: 1 });
-
-    // Swipe indexes
-    await Swipe.collection.createIndex(
-      { swiper: 1, swiped: 1 },
-      { unique: true }
-    );
-    await Swipe.collection.createIndex({ swiper: 1, action: 1, swipedAt: -1 });
-
-    console.log("✅ Database indexes created successfully");
-  } catch (error) {
-    console.error("❌ Error creating database indexes:", error);
-  }
-};
-
-// ===== AUTOMATED CLEANUP JOBS =====
-
-const startCleanupJobs = () => {
-  const cron = require("node-cron");
-
-  // Clean up expired matches every hour
-  cron.schedule("0 * * * *", async () => {
+  // Socket authentication middleware
+  io.use(async (socket, next) => {
     try {
-      const Match = require("./models/Match");
-      const expiredCount = await Match.expireOldMatches();
-      console.log(`🧹 Expired ${expiredCount} old matches`);
-    } catch (error) {
-      console.error("❌ Error in match cleanup job:", error);
-    }
-  });
+      const token = socket.handshake.auth.token;
+      if (!token) {
+        return next(new Error("Authentication error: No token provided"));
+      }
 
-  // Clean up old messages (older than 1 year) every day at 2 AM
-  cron.schedule("0 2 * * *", async () => {
-    try {
-      const Message = require("./models/Message");
-      const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+      const jwt = require("jsonwebtoken");
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      const result = await Message.deleteMany({
-        createdAt: { $lt: oneYearAgo },
-        isDeleted: true,
-      });
-
-      console.log(`🧹 Cleaned up ${result.deletedCount} old deleted messages`);
-    } catch (error) {
-      console.error("❌ Error in message cleanup job:", error);
-    }
-  });
-
-  // Update user activity status every 15 minutes
-  cron.schedule("*/15 * * * *", async () => {
-    try {
       const User = require("./models/User");
-      const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+      const user = await User.findById(decoded.userId).select("+safety");
 
-      // Mark users as inactive if they haven't been active recently
-      await User.updateMany(
-        {
-          lastActive: { $lt: fifteenMinutesAgo },
-          isActive: true,
-        },
-        {
-          $set: { "status.isOnline": false },
-        }
-      );
+      if (!user || !user.isActive) {
+        return next(new Error("User not found or inactive"));
+      }
+
+      socket.userId = user._id.toString();
+      socket.user = {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        photos: user.photos,
+        safety: user.safety,
+        settings: user.settings,
+      };
+
+      next();
     } catch (error) {
-      console.error("❌ Error in user activity update job:", error);
+      next(new Error("Authentication failed"));
     }
   });
 
-  console.log("✅ Cleanup jobs scheduled");
-};
+  io.on("connection", async (socket) => {
+    const userId = socket.userId;
+    const user = socket.user;
 
-// ===== ENHANCED GLOBAL ERROR HANDLER =====
+    console.log(`👤 User ${user.firstName} connected: ${socket.id}`);
 
-const globalErrorHandler = (err, req, res, next) => {
-  err.statusCode = err.statusCode || 500;
-  err.status = err.status || "error";
+    // Track connection
+    activeConnections.set(socket.id, {
+      userId,
+      user,
+      connectedAt: new Date(),
+      lastActivity: new Date(),
+    });
 
-  // Log error
-  console.error("ERROR 💥", {
-    error: err.message,
-    stack: err.stack,
-    url: req.originalUrl,
-    method: req.method,
-    ip: req.ip,
-    userAgent: req.get("User-Agent"),
-    timestamp: new Date().toISOString(),
+    if (!userSockets.has(userId)) {
+      userSockets.set(userId, new Set());
+    }
+    userSockets.get(userId).add(socket.id);
+
+    userRooms.set(userId, new Set());
+
+    // Update user's last active
+    const User = require("./models/User");
+    await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+
+    // Join user to their match rooms
+    const Match = require("./models/Match");
+    const userMatches = await Match.find({ users: userId, status: "active" });
+
+    for (const match of userMatches) {
+      const roomName = `match_${match._id}`;
+      socket.join(roomName);
+      userRooms.get(userId).add(roomName);
+
+      const otherUserId = match.users.find((u) => u.toString() !== userId);
+      socket.to(roomName).emit("user_online", {
+        userId,
+        user: { _id: userId, firstName: user.firstName },
+        matchId: match._id,
+      });
+    }
+
+    // Message sending
+    socket.on("send_message", async (data) => {
+      try {
+        const { matchId, content, messageType = "text" } = data;
+
+        if (!matchId || !content?.trim()) {
+          socket.emit("error", {
+            message: "Match ID and content are required",
+          });
+          return;
+        }
+
+        // Verify match
+        const match = await Match.findById(matchId).populate(
+          "users",
+          "firstName lastName safety"
+        );
+        if (!match || !match.users.find((u) => u._id.toString() === userId)) {
+          socket.emit("error", {
+            message: "Access denied to this conversation",
+          });
+          return;
+        }
+
+        const otherUser = match.users.find((u) => u._id.toString() !== userId);
+
+        // Check for blocks
+        if (
+          user.safety?.blockedUsers?.includes(otherUser._id) ||
+          otherUser.safety?.blockedUsers?.includes(userId)
+        ) {
+          socket.emit("error", { message: "Cannot send message to this user" });
+          return;
+        }
+
+        // Create message
+        const Message = require("./models/Message");
+        const message = new Message({
+          match: matchId,
+          sender: userId,
+          receiver: otherUser._id,
+          content: content.trim(),
+          messageType,
+        });
+
+        await message.save();
+
+        // Update match
+        const isFirstMessage = !match.firstMessageSentAt;
+        if (isFirstMessage) {
+          match.firstMessageSentAt = new Date();
+          match.firstMessageSentBy = userId;
+          match.expiresAt = null;
+        }
+        match.lastActivity = new Date();
+        await match.save();
+
+        await message.populate("sender", "firstName lastName photos");
+
+        const formattedMessage = {
+          _id: message._id,
+          content: message.content,
+          sender: {
+            _id: message.sender._id,
+            firstName: message.sender.firstName,
+          },
+          createdAt: message.createdAt,
+          messageType: message.messageType,
+          matchId,
+        };
+
+        io.to(`match_${matchId}`).emit("new_message", formattedMessage);
+
+        socket.emit("message_sent", {
+          messageId: message._id,
+          sentAt: message.createdAt,
+        });
+      } catch (error) {
+        console.error("Message send error:", error);
+        socket.emit("error", { message: "Error sending message" });
+      }
+    });
+
+    // Typing indicators
+    socket.on("typing_start", (data) => {
+      const { matchId } = data;
+      if (!matchId) return;
+
+      if (typingUsers.has(matchId)) {
+        clearTimeout(typingUsers.get(matchId).timeout);
+      }
+
+      const timeout = setTimeout(() => {
+        typingUsers.delete(matchId);
+        socket.to(`match_${matchId}`).emit("user_typing", {
+          userId,
+          userName: user.firstName,
+          matchId,
+          isTyping: false,
+        });
+      }, 3000);
+
+      typingUsers.set(matchId, { userId, userName: user.firstName, timeout });
+
+      socket.to(`match_${matchId}`).emit("user_typing", {
+        userId,
+        userName: user.firstName,
+        matchId,
+        isTyping: true,
+      });
+    });
+
+    socket.on("typing_stop", (data) => {
+      const { matchId } = data;
+      if (
+        typingUsers.has(matchId) &&
+        typingUsers.get(matchId).userId === userId
+      ) {
+        clearTimeout(typingUsers.get(matchId).timeout);
+        typingUsers.delete(matchId);
+        socket.to(`match_${matchId}`).emit("user_typing", {
+          userId,
+          userName: user.firstName,
+          matchId,
+          isTyping: false,
+        });
+      }
+    });
+
+    // Join/Leave conversation
+    socket.on("join_conversation", async (data) => {
+      const { matchId } = data;
+      const match = await Match.findById(matchId);
+      if (match && match.users.includes(userId)) {
+        socket.join(`match_${matchId}`);
+
+        // Mark messages as read
+        const Message = require("./models/Message");
+        await Message.updateMany(
+          { match: matchId, receiver: userId, readAt: null },
+          { readAt: new Date() }
+        );
+      }
+    });
+
+    socket.on("leave_conversation", (data) => {
+      const { matchId } = data;
+      socket.leave(`match_${matchId}`);
+    });
+
+    socket.on("mark_messages_read", async (data) => {
+      try {
+        const { matchId } = data;
+        const Message = require("./models/Message");
+
+        await Message.updateMany(
+          { match: matchId, receiver: userId, readAt: null },
+          { readAt: new Date() }
+        );
+
+        socket.to(`match_${matchId}`).emit("messages_read", {
+          matchId,
+          readBy: userId,
+          readAt: new Date(),
+        });
+      } catch (error) {
+        console.error("Mark messages read error:", error);
+      }
+    });
+
+    // Disconnect handler
+    socket.on("disconnect", async (reason) => {
+      console.log(`👋 User ${user.firstName} disconnected: ${reason}`);
+
+      activeConnections.delete(socket.id);
+
+      if (userSockets.has(userId)) {
+        userSockets.get(userId).delete(socket.id);
+        if (userSockets.get(userId).size === 0) {
+          userSockets.delete(userId);
+
+          // Clean up typing
+          for (const [matchId, typingData] of typingUsers.entries()) {
+            if (typingData.userId === userId) {
+              clearTimeout(typingData.timeout);
+              typingUsers.delete(matchId);
+            }
+          }
+
+          // Notify offline
+          const userRoomsList = userRooms.get(userId) || new Set();
+          userRoomsList.forEach((roomName) => {
+            socket.to(roomName).emit("user_offline", {
+              userId,
+              lastSeen: new Date(),
+            });
+          });
+
+          userRooms.delete(userId);
+        }
+      }
+
+      await User.findByIdAndUpdate(userId, { lastActive: new Date() });
+    });
   });
-
-  if (process.env.NODE_ENV === "development") {
-    sendErrorDev(err, res);
-  } else {
-    let error = { ...err };
-    error.message = err.message;
-
-    if (error.name === "CastError") error = handleCastErrorDB(error);
-    if (error.code === 11000) error = handleDuplicateFieldsDB(error);
-    if (error.name === "ValidationError")
-      error = handleValidationErrorDB(error);
-    if (error.name === "JsonWebTokenError") error = handleJWTError();
-    if (error.name === "TokenExpiredError") error = handleJWTExpiredError();
-
-    sendErrorProd(error, res);
-  }
-};
-
-// ===== EXPORT ENHANCED MODULES =====
-
-module.exports = {
-  // Security middleware
-  validateInput,
-  validatePassword,
-  authenticate,
 
   // Utility functions
-  calculateAge,
-  calculateDistance,
+  io.isUserOnline = (userId) => userSockets.has(userId);
+  io.getOnlineUserCount = () => userSockets.size;
 
-  // Error handling
-  AppError,
-  globalErrorHandler,
-
-  // Socket handler
-  socketHandler,
-
-  // Database functions
-  connectDB,
-  createDatabaseIndexes,
-
-  // Cleanup
-  startCleanupJobs,
-
-  // Rate limiters
-  generalLimiter,
-  authLimiter,
-  uploadLimiter,
-  messageLimiter,
+  return io;
 };
 
-// ===== SERVER STARTUP =====
-
-// Parse JSON bodies
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-// CORS configuration
-app.use(
-  cors({
-    origin: process.env.FRONTEND_URL || "http://localhost:3000",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-    ],
-  })
-);
-
-// Apply input validation to all routes
-app.use(validateInput);
-
 // ===== ROUTES =====
-
-// Health check route
 app.get("/health", (req, res) => {
   res.json({
     success: true,
@@ -1107,13 +433,55 @@ app.get("/health", (req, res) => {
   });
 });
 
+// Middleware to attach io to requests
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
+
 // API routes
 app.use("/api/auth", require("./routes/auth"));
 app.use("/api/photos", require("./routes/photos"));
 app.use("/api/profile", require("./routes/profile"));
+app.use("/api/matching", require("./routes/matching"));
+app.use("/api/chat", require("./routes/chat"));
+app.use("/api/debug", require("./routes/debug"));
+app.use("/api/safety", require("./routes/safety"));
+
+// ===== ERROR HANDLING =====
+app.use((err, req, res, next) => {
+  console.error("Error:", err);
+
+  if (err.name === "ValidationError") {
+    return res.status(400).json({
+      success: false,
+      message: "Validation error",
+      errors: Object.values(err.errors).map((e) => e.message),
+    });
+  }
+
+  if (err.code === 11000) {
+    return res.status(400).json({
+      success: false,
+      message: "Duplicate field value",
+    });
+  }
+
+  res.status(err.statusCode || 500).json({
+    success: false,
+    message: err.message || "Internal server error",
+  });
+});
+
+// 404 handler
+app.use("*", (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.originalUrl} not found`,
+  });
+});
 
 // ===== SOCKET.IO SETUP =====
-
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
@@ -1125,47 +493,49 @@ const io = new Server(server, {
 });
 
 // Initialize socket handler
-socketHandler(io);
+const socketIO = socketHandler(io);
 
-// ===== GLOBAL ERROR HANDLER =====
+// ===== CLEANUP JOBS =====
+const startCleanupJobs = () => {
+  // Clean up expired matches every hour
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const Match = require("./models/Match");
+      const now = new Date();
 
-app.use(globalErrorHandler);
+      const result = await Match.updateMany(
+        {
+          status: "active",
+          firstMessageSentAt: null,
+          expiresAt: { $lt: now },
+        },
+        { status: "expired" }
+      );
 
-// 404 handler
-app.use("*", (req, res) => {
-  res.status(404).json({
-    success: false,
-    message: `Route ${req.originalUrl} not found`,
+      console.log(`🧹 Expired ${result.modifiedCount} old matches`);
+    } catch (error) {
+      console.error("❌ Error in match cleanup job:", error);
+    }
   });
-});
+
+  console.log("✅ Cleanup jobs scheduled");
+};
 
 // ===== START SERVER =====
-
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
-    // Connect to MongoDB
     await connectDB();
-
-    // Start cleanup jobs
     startCleanupJobs();
 
-    // Start server
     server.listen(PORT, () => {
       console.log("🚀 HABIBI BACKEND SERVER");
       console.log("========================");
       console.log(`📡 HTTP Server: http://localhost:${PORT}`);
       console.log(`💬 Socket.io: ws://localhost:${PORT}`);
       console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`);
-      console.log(
-        `🔗 Frontend URL: ${
-          process.env.FRONTEND_URL || "http://localhost:3000"
-        }`
-      );
-      console.log("");
       console.log("✅ Server is ready!");
-      console.log("📊 Health check: http://localhost:" + PORT + "/health");
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);
@@ -1173,21 +543,19 @@ const startServer = async () => {
   }
 };
 
-// Handle unhandled promise rejections
+// Handle unhandled rejections
 process.on("unhandledRejection", (err) => {
   console.error("❌ UNHANDLED REJECTION! 💥 Shutting down...");
-  console.error(err.name, err.message);
+  console.error(err);
   server.close(() => {
     process.exit(1);
   });
 });
 
-// Handle uncaught exceptions
 process.on("uncaughtException", (err) => {
   console.error("❌ UNCAUGHT EXCEPTION! 💥 Shutting down...");
-  console.error(err.name, err.message);
+  console.error(err);
   process.exit(1);
 });
 
-// Start the server
 startServer();
