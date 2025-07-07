@@ -6,6 +6,7 @@ const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
 const { sendPushNotification } = require("./notifications");
+const pushNotificationService = require("../services/pushNotificationService");
 
 const router = express.Router();
 
@@ -453,52 +454,42 @@ router.post(
 
           // Send match notifications to both users
           await Promise.all([
-            sendPushNotification(swiperId, {
-              title: "💖 It's a Match!",
-              body: `You and ${swipedUser.firstName} liked each other!`,
-              type: "new_match",
-              userName: swipedUser.firstName,
-              data: {
-                url: "/chat",
-                matchId: match._id,
-                userId: swipedUserId,
-              },
+            pushNotificationService.sendMatchNotification(swiperId, {
+              matchId: match._id.toString(),
+              matchedUserId: swipedUserId.toString(),
+              matchedUserName: swipedUser.firstName,
+              matchedUserPhoto:
+                swipedUser.photos?.find((p) => p.isPrimary)?.url ||
+                swipedUser.photos?.[0]?.url,
             }),
-            sendPushNotification(swipedUserId, {
-              title: "💖 It's a Match!",
-              body: `You and ${currentUser.firstName} liked each other!`,
-              type: "new_match",
-              userName: currentUser.firstName,
-              data: {
-                url: "/chat",
-                matchId: match._id,
-                userId: swiperId,
-              },
+            pushNotificationService.sendMatchNotification(swipedUserId, {
+              matchId: match._id.toString(),
+              matchedUserId: swiperId.toString(),
+              matchedUserName: currentUser.firstName,
+              matchedUserPhoto:
+                currentUser.photos?.find((p) => p.isPrimary)?.url ||
+                currentUser.photos?.[0]?.url,
             }),
           ]);
         } else {
           // Send like notification to swiped user
           if (action === "superlike") {
-            await sendPushNotification(swipedUserId, {
-              title: "⭐ Super Like!",
-              body: `${currentUser.firstName} super liked you!`,
-              type: "super_like",
-              userName: currentUser.firstName,
-              data: {
-                url: "/dashboard",
-                userId: swiperId,
-              },
+            await pushNotificationService.sendLikeNotification(swipedUserId, {
+              likerId: swiperId.toString(),
+              likerName: currentUser.firstName,
+              likerPhoto:
+                currentUser.photos?.find((p) => p.isPrimary)?.url ||
+                currentUser.photos?.[0]?.url,
+              isSuper: true,
             });
           } else {
-            await sendPushNotification(swipedUserId, {
-              title: "❤️ Someone likes you!",
-              body: `${currentUser.firstName} liked your profile`,
-              type: "new_like",
-              userName: currentUser.firstName,
-              data: {
-                url: "/dashboard",
-                userId: swiperId,
-              },
+            await pushNotificationService.sendLikeNotification(swipedUserId, {
+              likerId: swiperId.toString(),
+              likerName: currentUser.firstName,
+              likerPhoto:
+                currentUser.photos?.find((p) => p.isPrimary)?.url ||
+                currentUser.photos?.[0]?.url,
+              isSuper: false,
             });
           }
         }

@@ -388,8 +388,23 @@ const socketHandler = (io) => {
         // Send push notification if other user is offline
         const isOtherUserOnline = onlineUsers.has(otherUser._id.toString());
         if (!isOtherUserOnline && otherUser.settings?.notifications?.messages) {
-          console.log(`📱 Push notification needed for ${otherUser.firstName}`);
-          // TODO: Implement actual push notification
+          const pushNotificationService = require("../services/pushNotificationService");
+
+          const senderPhoto =
+            user.photos?.find((p) => p.isPrimary)?.url ||
+            user.photos?.[0]?.url ||
+            "";
+          const unreadCount = await Message.getUnreadCount(otherUser._id);
+
+          await pushNotificationService.sendMessageNotification(otherUser._id, {
+            messageId: message._id.toString(),
+            matchId,
+            senderId: userId,
+            senderName: user.firstName,
+            senderPhoto,
+            content: message.content,
+            unreadCount,
+          });
         }
 
         // Emit conversation started event if first message
