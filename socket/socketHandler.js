@@ -1,53 +1,35 @@
-// socket/socketHandler.js - ENHANCED FIXED VERSION
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
 
-// Enhanced data structures with better memory management
-const onlineUsers = new Map();
-const typingUsers = new Map(); // matchId -> { userId, userName, timestamp }
+// Enhanced tracking with better performance
+const onlineUsers = new Map(); // userId -> { socketId, user, connectedAt, lastSeen, rooms }
+const userSockets = new Map(); // userId -> Set of socketIds (for multiple tabs/devices)
+const typingUsers = new Map(); // matchId -> { userId, userName, timestamp, timeout }
 const userRooms = new Map(); // userId -> Set of room names
-const connectionCleanupTimers = new Map(); // socketId -> timeoutId
 
 const socketHandler = (io) => {
   console.log("🔌 Enhanced Socket.io handler initialized");
 
-  // Enhanced middleware for socket authentication
+  // Enhanced authentication middleware
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
 
-      if (!token || token === "null" || token === "undefined") {
+      if (!token) {
         console.log("❌ Socket auth failed: No token provided");
         return next(new Error("Authentication error: No token provided"));
       }
 
       // Verify JWT token
-      let decoded;
-      try {
-        decoded = jwt.verify(
-          token,
-          process.env.JWT_SECRET || "your-secret-key"
-        );
-      } catch (jwtError) {
-        console.log("❌ Socket auth failed: Invalid token -", jwtError.message);
-        if (jwtError.name === "TokenExpiredError") {
-          return next(new Error("Token expired"));
-        }
-        return next(new Error("Invalid token"));
-      }
+      const decoded = jwt.verify(
+        token,
+        process.env.JWT_SECRET || "your-secret-key"
+      );
 
-      // Get user from database with safety data and essential fields only
-      let user;
-      try {
-        user = await User.findById(decoded.userId)
-          .select("firstName lastName photos safety settings isActive")
-          .lean(); // Use lean() for better performance
-      } catch (dbError) {
-        console.log("❌ Socket auth failed: Database error -", dbError.message);
-        return next(new Error("Database error"));
-      }
+      // Get user from database with safety data
+      const user = await User.findById(decoded.userId).select("+safety");
 
       if (!user || !user.isActive) {
         console.log(
@@ -55,6 +37,11 @@ const socketHandler = (io) => {
           decoded.userId
         );
         return next(new Error("User not found or inactive"));
+      }
+
+      // Check for account lockout
+      if (user.isLocked) {
+        return next(new Error("Account is temporarily locked"));
       }
 
       // Attach user data to socket
@@ -72,7 +59,14 @@ const socketHandler = (io) => {
       next();
     } catch (error) {
       console.log("❌ Socket auth error:", error.message);
-      next(new Error("Authentication failed"));
+
+      if (error.name === "JsonWebTokenError") {
+        next(new Error("Invalid token"));
+      } else if (error.name === "TokenExpiredError") {
+        next(new Error("Token expired"));
+      } else {
+        next(new Error("Authentication failed"));
+      }
     }
   });
 
@@ -84,9 +78,15 @@ const socketHandler = (io) => {
     console.log(`👤 User ${user.firstName} connected: ${socket.id}`);
 
     try {
-      // Enhanced user tracking with connection metadata
+      // Track user sockets (handle multiple tabs/devices)
+      if (!userSockets.has(userId)) {
+        userSockets.set(userId, new Set());
+      }
+      userSockets.get(userId).add(socket.id);
+
+      // Add/update user in online users with enhanced metadata
       onlineUsers.set(userId, {
-        socketId: socket.id,
+        socketId: socket.id, // Primary socket ID
         user: {
           _id: user._id,
           firstName: user.firstName,
@@ -97,96 +97,66 @@ const socketHandler = (io) => {
         connectedAt: new Date(),
         lastSeen: new Date(),
         rooms: new Set(),
+        deviceCount: userSockets.get(userId).size,
       });
 
       // Initialize user rooms tracking
-      userRooms.set(userId, new Set());
-
-      // Update user's last active timestamp (non-blocking)
-      User.findByIdAndUpdate(userId, { lastActive: new Date() }).catch(
-        (err) => {
-          console.error("Error updating lastActive:", err);
-        }
-      );
-
-      // Join user to their match rooms with error handling
-      try {
-        const userMatches = await Match.find({
-          users: userId,
-          status: "active",
-        })
-          .select("_id users")
-          .lean();
-
-        for (const match of userMatches) {
-          const roomName = `match_${match._id}`;
-          socket.join(roomName);
-
-          if (onlineUsers.has(userId)) {
-            onlineUsers.get(userId).rooms.add(roomName);
-          }
-          if (userRooms.has(userId)) {
-            userRooms.get(userId).add(roomName);
-          }
-
-          console.log(`🏠 User ${user.firstName} joined room: ${roomName}`);
-
-          // Notify other user in the match that this user is online
-          const otherUserId = match.users
-            .find((id) => id.toString() !== userId)
-            .toString();
-          socket.to(roomName).emit("user_online", {
-            userId,
-            user: onlineUsers.get(userId).user,
-            matchId: match._id,
-            timestamp: new Date(),
-          });
-        }
-      } catch (matchError) {
-        console.error("Error loading user matches:", matchError);
+      if (!userRooms.has(userId)) {
+        userRooms.set(userId, new Set());
       }
 
-      // Send initial online users list for user's matches
-      const onlineMatchUsers = [];
-      const userMatchesForOnline = await Match.find({
-        users: userId,
-        status: "active",
-      })
-        .select("_id users")
-        .lean()
-        .catch(() => []);
-
-      userMatchesForOnline.forEach((match) => {
-        const otherUserId = match.users
-          .find((id) => id.toString() !== userId)
-          .toString();
-        if (onlineUsers.has(otherUserId)) {
-          onlineMatchUsers.push({
-            userId: otherUserId,
-            user: onlineUsers.get(otherUserId).user,
-            matchId: match._id,
-          });
-        }
+      // Update user's last active timestamp
+      await User.findByIdAndUpdate(userId, {
+        lastActive: new Date(),
+        $inc: { "stats.profileViews": 1 },
       });
 
-      socket.emit("online_users", onlineMatchUsers);
+      // Join user to their match rooms
+      const userMatches = await Match.findForUser(userId);
 
-      // Send unread message summary with error handling
-      try {
-        const unreadCount = await Message.countDocuments({
-          receiver: userId,
-          readAt: null,
-          isDeleted: false,
+      for (const match of userMatches) {
+        const roomName = `match_${match._id}`;
+        socket.join(roomName);
+        onlineUsers.get(userId).rooms.add(roomName);
+        userRooms.get(userId).add(roomName);
+
+        console.log(`🏠 User ${user.firstName} joined room: ${roomName}`);
+
+        // Notify other user in the match that this user is online
+        const otherUserId = match.getOtherUser(userId);
+        socket.to(roomName).emit("user_online", {
+          userId,
+          user: onlineUsers.get(userId).user,
+          matchId: match._id,
+          timestamp: new Date(),
         });
-        socket.emit("unread_summary", { totalUnread: unreadCount });
-      } catch (unreadError) {
-        console.error("Error getting unread count:", unreadError);
       }
+
+      // Send connection confirmation with user data
+      socket.emit("connection_confirmed", {
+        message: "Successfully connected to Habibi chat",
+        userId,
+        timestamp: new Date(),
+        onlineUsers: getOnlineUsersForMatches(userId, userMatches),
+      });
+
+      // Send unread message summary
+      const unreadCount = await Message.getUnreadCount(userId);
+      socket.emit("unread_summary", {
+        totalUnread: unreadCount,
+        timestamp: new Date(),
+      });
     } catch (error) {
       console.error("❌ Error during socket connection setup:", error);
+      socket.emit("error", {
+        message: "Connection setup failed",
+        details: error.message,
+      });
     }
 
-    // Enhanced conversation joining with validation
+    // ===== EVENT HANDLERS =====
+
+    // Handle joining a specific conversation
     socket.on("join_conversation", async (data) => {
       try {
         const { matchId } = data;
@@ -201,8 +171,8 @@ const socketHandler = (io) => {
         );
 
         // Verify user is part of this match
-        const match = await Match.findById(matchId).select("users").lean();
-        if (!match || !match.users.some((id) => id.toString() === userId)) {
+        const match = await Match.findById(matchId);
+        if (!match || !match.users.includes(userId)) {
           socket.emit("error", {
             message: "Access denied to this conversation",
           });
@@ -220,18 +190,8 @@ const socketHandler = (io) => {
           userRooms.get(userId).add(roomName);
         }
 
-        // Mark messages as read when joining conversation (non-blocking)
-        Message.updateMany(
-          {
-            match: matchId,
-            receiver: userId,
-            readAt: null,
-            isDeleted: false,
-          },
-          { readAt: new Date() }
-        ).catch((err) => {
-          console.error("Error marking messages as read:", err);
-        });
+        // Mark messages as read when joining conversation
+        await Message.markConversationAsRead(matchId, userId);
 
         // Notify other user
         socket.to(roomName).emit("user_joined_conversation", {
@@ -244,7 +204,10 @@ const socketHandler = (io) => {
         // Send conversation metadata
         socket.emit("conversation_joined", {
           matchId,
-          timestamp: new Date(),
+          conversationStarted: !!match.firstMessageSentAt,
+          timeToExpiration: match.timeToExpiration,
+          urgencyLevel: match.urgencyLevel,
+          roomName,
         });
       } catch (error) {
         console.error("❌ Error joining conversation:", error);
@@ -252,7 +215,7 @@ const socketHandler = (io) => {
       }
     });
 
-    // Enhanced conversation leaving
+    // Handle leaving a conversation
     socket.on("leave_conversation", (data) => {
       try {
         const { matchId } = data;
@@ -273,18 +236,7 @@ const socketHandler = (io) => {
         }
 
         // Stop typing if user was typing
-        if (
-          typingUsers.has(matchId) &&
-          typingUsers.get(matchId).userId === userId
-        ) {
-          typingUsers.delete(matchId);
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }
+        clearTypingIndicator(userId, matchId, roomName);
 
         // Notify other user
         socket.to(roomName).emit("user_left_conversation", {
@@ -292,142 +244,19 @@ const socketHandler = (io) => {
           matchId,
           timestamp: new Date(),
         });
+
+        socket.emit("conversation_left", { matchId, roomName });
       } catch (error) {
         console.error("❌ Error leaving conversation:", error);
       }
     });
 
-    // Enhanced typing indicators with better timeout management
-    socket.on("typing_start", (data) => {
-      try {
-        const { matchId } = data;
-
-        if (!matchId) {
-          socket.emit("error", { message: "Match ID is required" });
-          return;
-        }
-
-        const roomName = `match_${matchId}`;
-
-        // Clear any existing typing timeout for this match
-        if (typingUsers.has(matchId)) {
-          const existingTyping = typingUsers.get(matchId);
-          if (existingTyping.timeout) {
-            clearTimeout(existingTyping.timeout);
-          }
-        }
-
-        // Set new typing status with auto-cleanup
-        const typingTimeout = setTimeout(() => {
-          typingUsers.delete(matchId);
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }, 3000); // Auto-stop typing after 3 seconds
-
-        typingUsers.set(matchId, {
-          userId,
-          userName: user.firstName,
-          timeout: typingTimeout,
-          startedAt: new Date(),
-        });
-
-        socket.to(roomName).emit("user_typing", {
-          userId,
-          userName: user.firstName,
-          matchId,
-          isTyping: true,
-        });
-      } catch (error) {
-        console.error("❌ Error handling typing start:", error);
-      }
-    });
-
-    socket.on("typing_stop", (data) => {
-      try {
-        const { matchId } = data;
-        const roomName = `match_${matchId}`;
-
-        // Clear typing status
-        if (
-          typingUsers.has(matchId) &&
-          typingUsers.get(matchId).userId === userId
-        ) {
-          const typingData = typingUsers.get(matchId);
-          if (typingData.timeout) {
-            clearTimeout(typingData.timeout);
-          }
-          typingUsers.delete(matchId);
-
-          socket.to(roomName).emit("user_typing", {
-            userId,
-            userName: user.firstName,
-            matchId,
-            isTyping: false,
-          });
-        }
-      } catch (error) {
-        console.error("❌ Error handling typing stop:", error);
-      }
-    });
-
-    // Enhanced message read receipts
-    socket.on("mark_messages_read", async (data) => {
-      try {
-        const { matchId } = data;
-
-        if (!matchId) {
-          socket.emit("error", { message: "Match ID is required" });
-          return;
-        }
-
-        // Mark messages as read in database
-        const result = await Message.updateMany(
-          {
-            match: matchId,
-            receiver: userId,
-            readAt: null,
-            isDeleted: false,
-          },
-          { readAt: new Date() }
-        );
-
-        if (result.modifiedCount > 0) {
-          const roomName = `match_${matchId}`;
-
-          // Notify other user that messages have been read
-          socket.to(roomName).emit("messages_read", {
-            matchId,
-            readBy: userId,
-            readAt: new Date(),
-            messagesRead: result.modifiedCount,
-          });
-
-          // Update user's unread count
-          const newUnreadCount = await Message.countDocuments({
-            receiver: userId,
-            readAt: null,
-            isDeleted: false,
-          });
-
-          socket.emit("unread_count_updated", {
-            totalUnread: newUnreadCount,
-          });
-        }
-      } catch (error) {
-        console.error("❌ Error marking messages as read:", error);
-        socket.emit("error", { message: "Error marking messages as read" });
-      }
-    });
-
-    // Enhanced real-time message sending with comprehensive validation
+    // Enhanced message sending with comprehensive validation
     socket.on("send_message", async (data) => {
       try {
         const { matchId, content, messageType = "text", tempId } = data;
 
+        // Input validation
         if (!matchId || !content?.trim()) {
           socket.emit("error", {
             message: "Match ID and content are required",
@@ -436,7 +265,33 @@ const socketHandler = (io) => {
           return;
         }
 
+        // Content length validation
+        if (content.trim().length > 1000) {
+          socket.emit("error", {
+            message: "Message too long (max 1000 characters)",
+            tempId,
+          });
+          return;
+        }
+
         console.log(`💬 Message from ${user.firstName} in match ${matchId}`);
+
+        // Rate limiting check
+        const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+        const recentMessageCount = await Message.countDocuments({
+          sender: userId,
+          match: matchId,
+          createdAt: { $gte: oneMinuteAgo },
+        });
+
+        if (recentMessageCount >= 10) {
+          socket.emit("error", {
+            message: "Too many messages sent. Please slow down.",
+            code: "RATE_LIMIT_EXCEEDED",
+            tempId,
+          });
+          return;
+        }
 
         // Verify match and user permissions
         const match = await Match.findById(matchId).populate(
@@ -456,8 +311,8 @@ const socketHandler = (io) => {
 
         // Check if users have blocked each other
         if (
-          user.safety?.blockedUsers?.includes(otherUser._id) ||
-          otherUser.safety?.blockedUsers?.includes(userId)
+          user.safety.blockedUsers.includes(otherUser._id) ||
+          otherUser.safety.blockedUsers.includes(userId)
         ) {
           socket.emit("error", {
             message: "Cannot send message to this user",
@@ -466,33 +321,21 @@ const socketHandler = (io) => {
           return;
         }
 
-        // Enhanced rate limiting
-        const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
-        const recentMessageCount = await Message.countDocuments({
-          sender: userId,
-          match: matchId,
-          createdAt: { $gte: oneMinuteAgo },
-        });
-
-        if (recentMessageCount >= 15) {
-          // Increased limit slightly
+        // Check match status
+        if (match.status === "expired") {
           socket.emit("error", {
-            message: "Too many messages sent. Please slow down.",
-            code: "RATE_LIMIT_EXCEEDED",
+            message: "This match has expired",
             tempId,
           });
           return;
         }
 
-        // Content filtering (basic)
-        const filteredContent = content.trim();
-        if (filteredContent.length > 1000) {
-          socket.emit("error", {
-            message: "Message too long. Maximum 1000 characters.",
-            tempId,
-          });
-          return;
-        }
+        // Content filtering for safety
+        const filteredContent = content
+          .trim()
+          .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
+          .replace(/javascript:/gi, "")
+          .replace(/on\w+\s*=/gi, "");
 
         // Create and save message
         const message = new Message({
@@ -508,14 +351,10 @@ const socketHandler = (io) => {
         // Update match activity
         const isFirstMessage = !match.firstMessageSentAt;
         if (isFirstMessage) {
-          match.firstMessageSentAt = new Date();
-          match.firstMessageSentBy = userId;
-          match.conversationStarter = userId;
-          match.lastActivity = new Date();
-          match.expiresAt = null; // Clear expiration
-          await match.save();
+          await match.markFirstMessageSent(userId);
         } else {
-          await Match.findByIdAndUpdate(matchId, { lastActivity: new Date() });
+          match.lastActivity = new Date();
+          await match.save();
         }
 
         // Populate sender info for response
@@ -540,23 +379,17 @@ const socketHandler = (io) => {
         const roomName = `match_${matchId}`;
         io.to(roomName).emit("new_message", formattedMessage);
 
-        // Clear typing indicator if user was typing
-        if (
-          typingUsers.has(matchId) &&
-          typingUsers.get(matchId).userId === userId
-        ) {
-          const typingData = typingUsers.get(matchId);
-          if (typingData.timeout) {
-            clearTimeout(typingData.timeout);
-          }
-          typingUsers.delete(matchId);
-        }
+        // Clear typing indicator
+        clearTypingIndicator(userId, matchId, roomName);
 
-        // Send push notification if other user is offline and has notifications enabled
+        // Update last activity tracking
+        updateUserActivity(userId);
+
+        // Send push notification if other user is offline
         const isOtherUserOnline = onlineUsers.has(otherUser._id.toString());
         if (!isOtherUserOnline && otherUser.settings?.notifications?.messages) {
-          // TODO: Implement push notification service
-          console.log(`📱 Send push notification to ${otherUser.firstName}`);
+          console.log(`📱 Push notification needed for ${otherUser.firstName}`);
+          // TODO: Implement actual push notification
         }
 
         // Emit conversation started event if first message
@@ -570,123 +403,251 @@ const socketHandler = (io) => {
 
         // Confirm message sent to sender
         socket.emit("message_sent", {
-          tempId: tempId,
+          tempId,
           messageId: message._id,
           sentAt: message.createdAt,
+          success: true,
         });
       } catch (error) {
         console.error("❌ Socket message send error:", error);
         socket.emit("error", {
           message: "Error sending message",
           tempId: data.tempId,
+          details: error.message,
         });
       }
     });
 
-    // Handle user status updates
-    socket.on("update_status", async (data) => {
+    // Enhanced typing indicators
+    socket.on("typing_start", (data) => {
       try {
-        const { status } = data; // 'online', 'away', 'busy'
+        const { matchId } = data;
 
-        if (onlineUsers.has(userId)) {
-          onlineUsers.get(userId).status = status;
-          onlineUsers.get(userId).lastSeen = new Date();
+        if (!matchId) {
+          socket.emit("error", { message: "Match ID is required" });
+          return;
+        }
 
-          // Notify all matches about status change
-          const userMatchesForStatus = await Match.find({
-            users: userId,
-            status: "active",
-          })
-            .select("_id")
-            .lean();
+        const roomName = `match_${matchId}`;
+        setTypingIndicator(userId, user.firstName, matchId, roomName);
+        updateUserActivity(userId);
+      } catch (error) {
+        console.error("❌ Error handling typing start:", error);
+      }
+    });
 
-          userMatchesForStatus.forEach((match) => {
-            const roomName = `match_${match._id}`;
-            socket.to(roomName).emit("user_status_changed", {
-              userId,
-              status,
-              timestamp: new Date(),
-            });
+    socket.on("typing_stop", (data) => {
+      try {
+        const { matchId } = data;
+        const roomName = `match_${matchId}`;
+        clearTypingIndicator(userId, matchId, roomName);
+      } catch (error) {
+        console.error("❌ Error handling typing stop:", error);
+      }
+    });
+
+    // Mark messages as read
+    socket.on("mark_messages_read", async (data) => {
+      try {
+        const { matchId } = data;
+
+        if (!matchId) {
+          socket.emit("error", { message: "Match ID is required" });
+          return;
+        }
+
+        const result = await Message.markConversationAsRead(matchId, userId);
+
+        if (result.modifiedCount > 0) {
+          const roomName = `match_${matchId}`;
+
+          // Notify other user that messages have been read
+          socket.to(roomName).emit("messages_read", {
+            matchId,
+            readBy: userId,
+            readAt: new Date(),
+            messagesRead: result.modifiedCount,
+          });
+
+          // Update user's unread count
+          const newUnreadCount = await Message.getUnreadCount(userId);
+          socket.emit("unread_count_updated", {
+            totalUnread: newUnreadCount,
           });
         }
+
+        updateUserActivity(userId);
       } catch (error) {
-        console.error("❌ Error updating user status:", error);
+        console.error("❌ Error marking messages as read:", error);
+        socket.emit("error", { message: "Error marking messages as read" });
       }
     });
 
-    // Handle ping/pong for connection health
+    // Connection health check
     socket.on("ping", () => {
       socket.emit("pong", { timestamp: new Date() });
-
-      // Update last seen
-      if (onlineUsers.has(userId)) {
-        onlineUsers.get(userId).lastSeen = new Date();
-      }
+      updateUserActivity(userId);
     });
 
-    // Enhanced disconnect handler with comprehensive cleanup
+    // Enhanced disconnect handler with proper cleanup
     socket.on("disconnect", async (reason) => {
       console.log(`👋 User ${user.firstName} disconnected: ${reason}`);
 
       try {
-        // Clear any connection cleanup timer
-        if (connectionCleanupTimers.has(socket.id)) {
-          clearTimeout(connectionCleanupTimers.get(socket.id));
-          connectionCleanupTimers.delete(socket.id);
-        }
+        // Update user's last active timestamp
+        await User.findByIdAndUpdate(userId, { lastActive: new Date() });
 
-        // Update user's last active timestamp (non-blocking)
-        User.findByIdAndUpdate(userId, { lastActive: new Date() }).catch(
-          (err) => {
-            console.error("Error updating lastActive on disconnect:", err);
-          }
-        );
+        // Remove socket from user's socket set
+        if (userSockets.has(userId)) {
+          userSockets.get(userId).delete(socket.id);
 
-        // Clean up typing indicators
-        for (const [matchId, typingData] of typingUsers.entries()) {
-          if (typingData.userId === userId) {
-            if (typingData.timeout) {
-              clearTimeout(typingData.timeout);
-            }
-            typingUsers.delete(matchId);
+          // If no more sockets for this user, clean up completely
+          if (userSockets.get(userId).size === 0) {
+            userSockets.delete(userId);
 
-            // Notify other users that this user stopped typing
-            const roomName = `match_${matchId}`;
-            socket.to(roomName).emit("user_typing", {
-              userId,
-              userName: user.firstName,
-              matchId,
-              isTyping: false,
+            // Clean up typing indicators
+            cleanupUserTypingIndicators(userId);
+
+            // Notify matches that user went offline
+            const userRoomsList = userRooms.get(userId) || new Set();
+            userRoomsList.forEach((roomName) => {
+              socket.to(roomName).emit("user_offline", {
+                userId,
+                user: onlineUsers.get(userId)?.user,
+                lastSeen: new Date(),
+                timestamp: new Date(),
+              });
             });
+
+            // Clean up tracking data
+            onlineUsers.delete(userId);
+            userRooms.delete(userId);
+          } else {
+            // Update device count for remaining connections
+            if (onlineUsers.has(userId)) {
+              onlineUsers.get(userId).deviceCount =
+                userSockets.get(userId).size;
+            }
           }
         }
-
-        // Notify matches that user went offline
-        const userRoomsList = userRooms.get(userId) || new Set();
-        userRoomsList.forEach((roomName) => {
-          socket.to(roomName).emit("user_offline", {
-            userId,
-            user: onlineUsers.get(userId)?.user,
-            lastSeen: new Date(),
-            timestamp: new Date(),
-          });
-        });
-
-        // Clean up tracking data
-        onlineUsers.delete(userId);
-        userRooms.delete(userId);
       } catch (error) {
         console.error("❌ Error during disconnect cleanup:", error);
       }
     });
 
-    // Handle socket errors
+    // Handle errors
     socket.on("error", (error) => {
       console.error(`❌ Socket error for user ${user.firstName}:`, error);
+
+      // Log error for monitoring in production
+      if (process.env.NODE_ENV === "production") {
+        console.error("Socket Error:", {
+          userId,
+          socketId: socket.id,
+          error: error.message,
+          timestamp: new Date(),
+        });
+      }
     });
   });
 
-  // Enhanced utility functions for external use
+  // ===== UTILITY FUNCTIONS =====
+
+  // Set typing indicator with auto-cleanup
+  function setTypingIndicator(userId, userName, matchId, roomName) {
+    // Clear any existing typing timeout for this match
+    if (typingUsers.has(matchId)) {
+      clearTimeout(typingUsers.get(matchId).timeout);
+    }
+
+    // Set new typing status with auto-cleanup
+    const typingTimeout = setTimeout(() => {
+      typingUsers.delete(matchId);
+      io.to(roomName).emit("user_typing", {
+        userId,
+        userName,
+        matchId,
+        isTyping: false,
+      });
+    }, 3000);
+
+    typingUsers.set(matchId, {
+      userId,
+      userName,
+      timeout: typingTimeout,
+      startedAt: new Date(),
+    });
+
+    io.to(roomName).emit("user_typing", {
+      userId,
+      userName,
+      matchId,
+      isTyping: true,
+    });
+  }
+
+  // Clear typing indicator
+  function clearTypingIndicator(userId, matchId, roomName) {
+    if (
+      typingUsers.has(matchId) &&
+      typingUsers.get(matchId).userId === userId
+    ) {
+      clearTimeout(typingUsers.get(matchId).timeout);
+      typingUsers.delete(matchId);
+
+      io.to(roomName).emit("user_typing", {
+        userId,
+        userName: onlineUsers.get(userId)?.user?.firstName,
+        matchId,
+        isTyping: false,
+      });
+    }
+  }
+
+  // Clean up all typing indicators for a user
+  function cleanupUserTypingIndicators(userId) {
+    for (const [matchId, typingData] of typingUsers.entries()) {
+      if (typingData.userId === userId) {
+        clearTimeout(typingData.timeout);
+        typingUsers.delete(matchId);
+
+        const roomName = `match_${matchId}`;
+        io.to(roomName).emit("user_typing", {
+          userId,
+          userName: typingData.userName,
+          matchId,
+          isTyping: false,
+        });
+      }
+    }
+  }
+
+  // Update user activity timestamp
+  function updateUserActivity(userId) {
+    if (onlineUsers.has(userId)) {
+      onlineUsers.get(userId).lastSeen = new Date();
+    }
+  }
+
+  // Get online users for specific matches
+  function getOnlineUsersForMatches(userId, matches) {
+    const onlineMatchUsers = [];
+    matches.forEach((match) => {
+      const otherUserId = match.getOtherUser(userId).toString();
+      if (onlineUsers.has(otherUserId)) {
+        onlineMatchUsers.push({
+          userId: otherUserId,
+          user: onlineUsers.get(otherUserId).user,
+          matchId: match._id,
+          lastSeen: onlineUsers.get(otherUserId).lastSeen,
+        });
+      }
+    });
+    return onlineMatchUsers;
+  }
+
+  // ===== PUBLIC API FUNCTIONS =====
+
   io.getOnlineUsers = () => {
     return Array.from(onlineUsers.entries()).map(([userId, data]) => ({
       userId,
@@ -710,6 +671,7 @@ const socketHandler = (io) => {
           status: userData.status || "online",
           lastSeen: userData.lastSeen,
           connectedAt: userData.connectedAt,
+          deviceCount: userData.deviceCount,
         }
       : {
           isOnline: false,
@@ -719,10 +681,14 @@ const socketHandler = (io) => {
   };
 
   io.sendToUser = (userId, event, data) => {
-    const userInfo = onlineUsers.get(userId);
-    if (userInfo) {
-      io.to(userInfo.socketId).emit(event, data);
-      return true;
+    if (userSockets.has(userId)) {
+      const socketIds = userSockets.get(userId);
+      let sent = 0;
+      for (const socketId of socketIds) {
+        io.to(socketId).emit(event, data);
+        sent++;
+      }
+      return sent > 0;
     }
     return false;
   };
@@ -735,67 +701,41 @@ const socketHandler = (io) => {
     io.emit(event, data);
   };
 
-  // Enhanced periodic cleanup of stale data
-  const cleanupInterval = setInterval(() => {
+  // Enhanced periodic cleanup with better monitoring
+  setInterval(() => {
     const now = Date.now();
     const fiveMinutesAgo = now - 5 * 60 * 1000;
 
     // Clean up old typing indicators
     for (const [matchId, typingData] of typingUsers.entries()) {
       if (now - typingData.startedAt.getTime() > 10000) {
-        // 10 seconds
-        if (typingData.timeout) {
-          clearTimeout(typingData.timeout);
-        }
+        clearTimeout(typingData.timeout);
         typingUsers.delete(matchId);
       }
     }
 
-    // Clean up stale online users (shouldn't happen with proper disconnect handling)
+    // Clean up stale online users
     for (const [userId, userData] of onlineUsers.entries()) {
       if (userData.lastSeen.getTime() < fiveMinutesAgo) {
         console.log(`🧹 Cleaning up stale user data for ${userId}`);
         onlineUsers.delete(userId);
         userRooms.delete(userId);
+        userSockets.delete(userId);
       }
     }
 
-    // Clean up old connection cleanup timers
-    for (const [socketId, timerId] of connectionCleanupTimers.entries()) {
-      // If timer is very old, clear it
-      clearTimeout(timerId);
-      connectionCleanupTimers.delete(socketId);
-    }
+    // Log statistics
+    console.log(
+      `📊 Socket Stats - Online Users: ${
+        onlineUsers.size
+      }, Active Sockets: ${Array.from(userSockets.values()).reduce(
+        (sum, set) => sum + set.size,
+        0
+      )}, Typing: ${typingUsers.size}`
+    );
   }, 60000); // Run every minute
 
-  // Cleanup interval on server shutdown
-  process.on("SIGTERM", () => {
-    clearInterval(cleanupInterval);
-
-    // Clear all timeouts
-    for (const [, typingData] of typingUsers.entries()) {
-      if (typingData.timeout) {
-        clearTimeout(typingData.timeout);
-      }
-    }
-
-    for (const [, timerId] of connectionCleanupTimers.entries()) {
-      clearTimeout(timerId);
-    }
-  });
-
   console.log("✅ Enhanced Socket.io handler setup complete");
-
-  // Log statistics periodically
-  const statsInterval = setInterval(() => {
-    console.log(
-      `📊 Socket Stats - Online Users: ${onlineUsers.size}, Active Typing: ${typingUsers.size}, Rooms: ${userRooms.size}`
-    );
-  }, 300000); // Every 5 minutes
-
-  process.on("SIGTERM", () => {
-    clearInterval(statsInterval);
-  });
 };
 
 module.exports = socketHandler;
