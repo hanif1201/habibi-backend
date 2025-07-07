@@ -14,6 +14,22 @@ const cron = require("node-cron");
 // Load environment variables
 dotenv.config();
 
+// Initialize Firebase on startup
+const initializeFirebase = async () => {
+  try {
+    const firebaseService = require("./services/firebaseAdmin");
+    await firebaseService.initialize();
+    console.log("🔥 Firebase services initialized");
+  } catch (error) {
+    console.log(
+      "⚠️  Firebase initialization failed - notifications will be simulated"
+    );
+    console.log(
+      "   Configure Firebase credentials in .env to enable real push notifications"
+    );
+  }
+};
+
 const app = express();
 
 // ===== SECURITY MIDDLEWARE =====
@@ -304,6 +320,7 @@ app.use("/api/photos", require("./routes/photos"));
 app.use("/api/profile", require("./routes/profile"));
 app.use("/api/matching", require("./routes/matching"));
 app.use("/api/chat", require("./routes/chat"));
+app.use("/api/notifications", require("./routes/notifications")); // ADD THIS LINE
 app.use("/api/debug", require("./routes/debug"));
 
 // ===== ERROR HANDLERS =====
@@ -320,6 +337,7 @@ app.use("*", (req, res) => {
       "/api/profile/*",
       "/api/matching/*",
       "/api/chat/*",
+      "/api/notifications/*", // ADD THIS LINE
       "/api/debug/*",
     ],
   });
@@ -335,6 +353,9 @@ const startServer = async () => {
   try {
     // Connect to MongoDB
     await connectDB();
+
+    // Initialize Firebase for push notifications
+    await initializeFirebase();
 
     // Start cleanup jobs
     startCleanupJobs();
@@ -357,6 +378,7 @@ const startServer = async () => {
       console.log("  • /api/photos/* - Photo management");
       console.log("  • /api/matching/* - Discover, swipe, matches");
       console.log("  • /api/chat/* - Real-time messaging");
+      console.log("  • /api/notifications/* - Push notifications"); // ADD THIS LINE
       console.log("  • /api/debug/* - Debug endpoints");
       console.log("");
       console.log("✅ Server is ready! Time to find love! 💕");

@@ -1,6 +1,7 @@
-// services/pushNotificationService.js
+// services/pushNotificationService.js - UPDATED VERSION
 
 const User = require("../models/User");
+const firebaseService = require("./firebaseAdmin");
 
 class PushNotificationService {
   constructor() {
@@ -37,13 +38,16 @@ class PushNotificationService {
         return { success: false, error: "No active device tokens" };
       }
 
+      // Extract just the token strings
+      const tokens = activeTokens.map((device) => device.token);
+
       const notification = {
-        title: `New message from ${notificationData.senderName}`,
+        title: `💕 ${notificationData.senderName}`,
         body:
           notificationData.content.length > 100
             ? notificationData.content.substring(0, 100) + "..."
             : notificationData.content,
-        icon: notificationData.senderPhoto || "/default-avatar.png",
+        icon: notificationData.senderPhoto || "/icon-192x192.png",
         badge: notificationData.unreadCount || 1,
         tag: `message_${notificationData.matchId}`,
         data: {
@@ -67,48 +71,40 @@ class PushNotificationService {
           },
         ],
         requireInteraction: false,
-        silent: false,
         vibrate: user.settings?.notifications?.vibration
           ? [200, 100, 200]
           : null,
       };
 
-      const results = await Promise.allSettled(
-        activeTokens.map((token) => this.sendToDevice(token, notification))
+      // Send via Firebase
+      const result = await firebaseService.sendNotification(
+        tokens,
+        notification
       );
 
-      const successful = results.filter(
-        (result) => result.status === "fulfilled" && result.value.success
-      );
-      const failed = results.filter(
-        (result) => result.status === "rejected" || !result.value.success
-      );
-
-      // Update user's notification stats
-      if (successful.length > 0) {
+      // Update user's notification stats if successful
+      if (result.success && result.successCount > 0) {
         await User.findByIdAndUpdate(userId, {
-          $inc: { "notificationStats.sent": successful.length },
+          $inc: { "notificationStats.sent": result.successCount },
           $set: { "notificationStats.lastNotificationSent": new Date() },
         });
       }
 
-      // Clean up failed tokens
-      if (failed.length > 0) {
-        await this.cleanupFailedTokens(userId, failed);
+      // Clean up invalid tokens
+      if (result.invalidTokens && result.invalidTokens.length > 0) {
+        await this.cleanupInvalidTokens(userId, result.invalidTokens);
       }
 
       return {
-        success: successful.length > 0,
-        sentTo: successful.length,
+        success: result.success,
+        sentTo: result.successCount || 0,
         totalDevices: activeTokens.length,
-        failed: failed.length,
-        error:
-          failed.length === activeTokens.length
-            ? "All notifications failed"
-            : null,
+        failed: result.failureCount || 0,
+        error: result.error,
+        simulated: result.simulated,
       };
     } catch (error) {
-      console.error("Push notification service error:", error);
+      console.error("Message notification service error:", error);
       return { success: false, error: error.message };
     }
   }
@@ -143,10 +139,12 @@ class PushNotificationService {
         return { success: false, error: "No active device tokens" };
       }
 
+      const tokens = activeTokens.map((device) => device.token);
+
       const notification = {
-        title: "New Match! 💕",
+        title: "💕 It's a Match!",
         body: `You and ${matchData.matchedUserName} liked each other!`,
-        icon: matchData.matchedUserPhoto || "/default-avatar.png",
+        icon: matchData.matchedUserPhoto || "/icon-192x192.png",
         badge: 1,
         tag: `match_${matchData.matchId}`,
         data: {
@@ -168,41 +166,37 @@ class PushNotificationService {
             icon: "/profile-icon.png",
           },
         ],
-        requireInteraction: false,
-        silent: false,
+        requireInteraction: true, // Make match notifications more prominent
         vibrate: user.settings?.notifications?.vibration
-          ? [300, 100, 300]
+          ? [300, 100, 300, 100, 300]
           : null,
       };
 
-      const results = await Promise.allSettled(
-        activeTokens.map((token) => this.sendToDevice(token, notification))
+      const result = await firebaseService.sendNotification(
+        tokens,
+        notification
       );
 
-      const successful = results.filter(
-        (result) => result.status === "fulfilled" && result.value.success
-      );
-      const failed = results.filter(
-        (result) => result.status === "rejected" || !result.value.success
-      );
-
-      // Update user's notification stats
-      if (successful.length > 0) {
+      // Update user's notification stats if successful
+      if (result.success && result.successCount > 0) {
         await User.findByIdAndUpdate(userId, {
-          $inc: { "notificationStats.sent": successful.length },
+          $inc: { "notificationStats.sent": result.successCount },
           $set: { "notificationStats.lastNotificationSent": new Date() },
         });
       }
 
+      // Clean up invalid tokens
+      if (result.invalidTokens && result.invalidTokens.length > 0) {
+        await this.cleanupInvalidTokens(userId, result.invalidTokens);
+      }
+
       return {
-        success: successful.length > 0,
-        sentTo: successful.length,
+        success: result.success,
+        sentTo: result.successCount || 0,
         totalDevices: activeTokens.length,
-        failed: failed.length,
-        error:
-          failed.length === activeTokens.length
-            ? "All notifications failed"
-            : null,
+        failed: result.failureCount || 0,
+        error: result.error,
+        simulated: result.simulated,
       };
     } catch (error) {
       console.error("Match notification error:", error);
@@ -240,14 +234,18 @@ class PushNotificationService {
         return { success: false, error: "No active device tokens" };
       }
 
+      const tokens = activeTokens.map((device) => device.token);
+
       const notification = {
-        title: "New Like! ❤️",
-        body: `${likeData.likerName} liked your profile!`,
-        icon: likeData.likerPhoto || "/default-avatar.png",
+        title: likeData.isSuper ? "⭐ Super Like!" : "❤️ New Like!",
+        body: likeData.isSuper
+          ? `${likeData.likerName} sent you a Super Like!`
+          : `${likeData.likerName} liked your profile!`,
+        icon: likeData.likerPhoto || "/icon-192x192.png",
         badge: 1,
         tag: `like_${likeData.likerId}`,
         data: {
-          type: "like",
+          type: likeData.isSuper ? "super_like" : "like",
           likerId: likeData.likerId,
           likerName: likeData.likerName,
           url: `/profile/${likeData.likerId}`,
@@ -265,40 +263,36 @@ class PushNotificationService {
           },
         ],
         requireInteraction: false,
-        silent: false,
         vibrate: user.settings?.notifications?.vibration
           ? [200, 100, 200]
           : null,
       };
 
-      const results = await Promise.allSettled(
-        activeTokens.map((token) => this.sendToDevice(token, notification))
+      const result = await firebaseService.sendNotification(
+        tokens,
+        notification
       );
 
-      const successful = results.filter(
-        (result) => result.status === "fulfilled" && result.value.success
-      );
-      const failed = results.filter(
-        (result) => result.status === "rejected" || !result.value.success
-      );
-
-      // Update user's notification stats
-      if (successful.length > 0) {
+      // Update user's notification stats if successful
+      if (result.success && result.successCount > 0) {
         await User.findByIdAndUpdate(userId, {
-          $inc: { "notificationStats.sent": successful.length },
+          $inc: { "notificationStats.sent": result.successCount },
           $set: { "notificationStats.lastNotificationSent": new Date() },
         });
       }
 
+      // Clean up invalid tokens
+      if (result.invalidTokens && result.invalidTokens.length > 0) {
+        await this.cleanupInvalidTokens(userId, result.invalidTokens);
+      }
+
       return {
-        success: successful.length > 0,
-        sentTo: successful.length,
+        success: result.success,
+        sentTo: result.successCount || 0,
         totalDevices: activeTokens.length,
-        failed: failed.length,
-        error:
-          failed.length === activeTokens.length
-            ? "All notifications failed"
-            : null,
+        failed: result.failureCount || 0,
+        error: result.error,
+        simulated: result.simulated,
       };
     } catch (error) {
       console.error("Like notification error:", error);
@@ -307,69 +301,116 @@ class PushNotificationService {
   }
 
   /**
-   * Send notification to a specific device
+   * Send a generic notification to a user
    */
-  async sendToDevice(deviceToken, notification) {
+  async sendGenericNotification(userId, title, body, data = {}) {
     try {
-      // This is where you would integrate with actual push notification services
-      // For now, we'll simulate the notification sending
+      const user = await User.findById(userId)
+        .select("firstName lastName deviceTokens settings notificationStats")
+        .lean();
 
-      switch (deviceToken.platform) {
-        case "web":
-          return await this.sendWebPush(deviceToken.token, notification);
-        case "android":
-          return await this.sendFCM(deviceToken.token, notification);
-        case "ios":
-          return await this.sendAPNS(deviceToken.token, notification);
-        default:
-          return { success: false, error: "Unsupported platform" };
+      if (!user) {
+        return { success: false, error: "User not found" };
       }
+
+      // Check if user can receive push notifications
+      if (!user.settings?.notifications?.push) {
+        return { success: false, error: "Push notifications disabled" };
+      }
+
+      const activeTokens =
+        user.deviceTokens?.filter((token) => token.isActive) || [];
+
+      if (activeTokens.length === 0) {
+        return { success: false, error: "No active device tokens" };
+      }
+
+      const tokens = activeTokens.map((device) => device.token);
+
+      const notification = {
+        title,
+        body,
+        icon: "/icon-192x192.png",
+        badge: 1,
+        tag: data.type || "generic",
+        data: {
+          ...data,
+          timestamp: new Date().toISOString(),
+        },
+        requireInteraction: false,
+        vibrate: user.settings?.notifications?.vibration
+          ? [200, 100, 200]
+          : null,
+      };
+
+      const result = await firebaseService.sendNotification(
+        tokens,
+        notification
+      );
+
+      // Update user's notification stats if successful
+      if (result.success && result.successCount > 0) {
+        await User.findByIdAndUpdate(userId, {
+          $inc: { "notificationStats.sent": result.successCount },
+          $set: { "notificationStats.lastNotificationSent": new Date() },
+        });
+      }
+
+      // Clean up invalid tokens
+      if (result.invalidTokens && result.invalidTokens.length > 0) {
+        await this.cleanupInvalidTokens(userId, result.invalidTokens);
+      }
+
+      return {
+        success: result.success,
+        sentTo: result.successCount || 0,
+        totalDevices: activeTokens.length,
+        failed: result.failureCount || 0,
+        error: result.error,
+        simulated: result.simulated,
+      };
     } catch (error) {
-      console.error(`Error sending to device ${deviceToken.token}:`, error);
+      console.error("Generic notification error:", error);
       return { success: false, error: error.message };
     }
   }
 
   /**
-   * Send web push notification
+   * Subscribe user to a topic
    */
-  async sendWebPush(token, notification) {
-    // TODO: Implement actual web push notification
-    // You would use libraries like web-push or similar
-    console.log("📱 Web push notification:", {
-      token: token.substring(0, 20) + "...",
-      notification: notification.title,
-    });
+  async subscribeToTopic(userId, topic) {
+    try {
+      const user = await User.findById(userId).select("deviceTokens").lean();
 
-    return { success: true };
+      if (!user) {
+        return { success: false, error: "User not found" };
+      }
+
+      const activeTokens =
+        user.deviceTokens?.filter((token) => token.isActive) || [];
+
+      if (activeTokens.length === 0) {
+        return { success: false, error: "No active device tokens" };
+      }
+
+      const tokens = activeTokens.map((device) => device.token);
+      return await firebaseService.subscribeToTopic(tokens, topic);
+    } catch (error) {
+      console.error("Topic subscription error:", error);
+      return { success: false, error: error.message };
+    }
   }
 
   /**
-   * Send Firebase Cloud Messaging notification
+   * Send notification to a topic
    */
-  async sendFCM(token, notification) {
-    // TODO: Implement FCM notification
-    // You would use firebase-admin SDK
-    console.log("📱 FCM notification:", {
-      token: token.substring(0, 20) + "...",
-      notification: notification.title,
-    });
-
-    return { success: true };
-  }
-
-  /**
-   * Send Apple Push Notification Service notification
-   */
-  async sendAPNS(token, notification) {
-    // TODO: Implement APNS notification
-    // You would use node-apn or similar library
-    console.log("📱 APNS notification:", {
-      token: token.substring(0, 20) + "...",
-      notification: notification.title,
-    });
-
-    return { success: true };
+  async sendToTopic(topic, notification, data = {}) {
+    try {
+      return await firebaseService.sendToTopic(topic, notification, data);
+    } catch (error) {
+      console.error("Topic notification error:", error);
+      return { success: false, error: error.message };
+    }
   }
 
   /**
@@ -398,27 +439,23 @@ class PushNotificationService {
   }
 
   /**
-   * Clean up failed device tokens
+   * Clean up invalid device tokens
    */
-  async cleanupFailedTokens(userId, failedResults) {
+  async cleanupInvalidTokens(userId, invalidTokens) {
     try {
-      const failedTokens = failedResults
-        .map((result) => result.value?.token || result.reason?.token)
-        .filter(Boolean);
-
-      if (failedTokens.length > 0) {
+      if (invalidTokens.length > 0) {
         await User.findByIdAndUpdate(userId, {
           $pull: {
-            deviceTokens: { token: { $in: failedTokens } },
+            deviceTokens: { token: { $in: invalidTokens } },
           },
         });
 
         console.log(
-          `🧹 Cleaned up ${failedTokens.length} failed device tokens for user ${userId}`
+          `🧹 Cleaned up ${invalidTokens.length} invalid device tokens for user ${userId}`
         );
       }
     } catch (error) {
-      console.error("Error cleaning up failed tokens:", error);
+      console.error("Error cleaning up invalid tokens:", error);
     }
   }
 
@@ -447,6 +484,28 @@ class PushNotificationService {
     } catch (error) {
       console.error("Error getting notification stats:", error);
       return null;
+    }
+  }
+
+  /**
+   * Health check for the notification service
+   */
+  async healthCheck() {
+    try {
+      const firebaseHealth = await firebaseService.healthCheck();
+
+      return {
+        healthy: firebaseHealth.healthy,
+        firebase: firebaseHealth,
+        supportedPlatforms: this.supportedPlatforms,
+        timestamp: new Date().toISOString(),
+      };
+    } catch (error) {
+      return {
+        healthy: false,
+        error: error.message,
+        timestamp: new Date().toISOString(),
+      };
     }
   }
 }

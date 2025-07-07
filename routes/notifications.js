@@ -1,4 +1,4 @@
-// routes/notifications.js
+// routes/notifications.js - UPDATED WITH REAL FIREBASE INTEGRATION
 const express = require("express");
 const { body, validationResult } = require("express-validator");
 const { authenticate } = require("../middleware/auth");
@@ -60,6 +60,8 @@ router.post(
         platform,
         deviceInfo: {
           userAgent: deviceInfo.userAgent || req.get("User-Agent"),
+          browser: getBrowserFromUserAgent(req.get("User-Agent")),
+          os: getOSFromUserAgent(req.get("User-Agent")),
           ...deviceInfo,
         },
         registeredAt: new Date(),
@@ -70,12 +72,14 @@ router.post(
       if (existingTokenIndex >= 0) {
         // Update existing token
         user.deviceTokens[existingTokenIndex] = deviceData;
-        console.log(`🔄 Updated device token for user ${user.firstName}`);
+        console.log(
+          `🔄 Updated device token for user ${user.firstName} (${platform})`
+        );
       } else {
         // Add new token
         user.deviceTokens.push(deviceData);
         console.log(
-          `📱 Registered new device token for user ${user.firstName}`
+          `📱 Registered new ${platform} device for user ${user.firstName}`
         );
       }
 
@@ -94,25 +98,33 @@ router.post(
         "general_notifications"
       );
 
-      // Send test notification to verify setup
+      // Send welcome notification to verify setup
       const testResult = await pushNotificationService.sendGenericNotification(
         userId,
         "🎉 Notifications Enabled!",
-        "You'll now receive push notifications from Habibi",
-        { type: "setup_complete" }
+        "You'll now receive push notifications from Habibi. Time to find love! 💕",
+        {
+          type: "setup_complete",
+          url: "/dashboard",
+        }
       );
 
       res.json({
         success: true,
         message: "Device registered successfully",
         deviceCount: user.deviceTokens.length,
+        platform,
         testNotificationSent: testResult.success,
+        testNotificationDetails: testResult.simulated
+          ? "Notification simulated (Firebase not configured)"
+          : `Sent to ${testResult.sentTo} device(s)`,
       });
     } catch (error) {
       console.error("Device registration error:", error);
       res.status(500).json({
         success: false,
         message: "Error registering device",
+        error: error.message,
       });
     }
   }
@@ -166,6 +178,7 @@ router.delete(
       res.status(500).json({
         success: false,
         message: "Error unregistering device",
+        error: error.message,
       });
     }
   }
@@ -209,6 +222,18 @@ router.put(
       .optional()
       .isBoolean()
       .withMessage("Vibration preference must be boolean"),
+    body("notifications.quietHours.enabled")
+      .optional()
+      .isBoolean()
+      .withMessage("Quiet hours enabled must be boolean"),
+    body("notifications.quietHours.start")
+      .optional()
+      .matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/)
+      .withMessage("Invalid start time format (HH:MM)"),
+    body("notifications.quietHours.end")
+      .optional()
+      .matches(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/)
+      .withMessage("Invalid end time format (HH:MM)"),
   ],
   async (req, res) => {
     try {
@@ -253,6 +278,7 @@ router.put(
       res.status(500).json({
         success: false,
         message: "Error updating preferences",
+        error: error.message,
       });
     }
   }
@@ -274,6 +300,8 @@ router.get("/preferences", authenticate, async (req, res) => {
       });
     }
 
+    const activeDevices = user.deviceTokens?.filter((d) => d.isActive) || [];
+
     res.json({
       success: true,
       preferences: user.settings?.notifications || {
@@ -284,30 +312,30 @@ router.get("/preferences", authenticate, async (req, res) => {
         email: true,
         sound: true,
         vibration: true,
+        quietHours: {
+          enabled: false,
+          start: "22:00",
+          end: "07:00",
+        },
       },
-      deviceCount: user.deviceTokens?.length || 0,
-      devices:
-        user.deviceTokens?.map((device) => ({
-          platform: device.platform,
-          registeredAt: device.registeredAt,
-          lastUsed: device.lastUsed,
-          isActive: device.isActive,
-          deviceInfo: {
-            browser: device.deviceInfo?.userAgent?.includes("Chrome")
-              ? "Chrome"
-              : device.deviceInfo?.userAgent?.includes("Firefox")
-              ? "Firefox"
-              : device.deviceInfo?.userAgent?.includes("Safari")
-              ? "Safari"
-              : "Unknown",
-          },
-        })) || [],
+      deviceCount: activeDevices.length,
+      devices: activeDevices.map((device) => ({
+        platform: device.platform,
+        registeredAt: device.registeredAt,
+        lastUsed: device.lastUsed,
+        isActive: device.isActive,
+        deviceInfo: {
+          browser: device.deviceInfo?.browser || "Unknown",
+          os: device.deviceInfo?.os || "Unknown",
+        },
+      })),
     });
   } catch (error) {
     console.error("Get preferences error:", error);
     res.status(500).json({
       success: false,
       message: "Error fetching preferences",
+      error: error.message,
     });
   }
 });
@@ -322,10 +350,11 @@ router.post("/test", authenticate, async (req, res) => {
     const result = await pushNotificationService.sendGenericNotification(
       userId,
       "🧪 Test Notification",
-      "This is a test notification from Habibi. If you can see this, push notifications are working!",
+      "This is a test notification from Habibi. If you can see this, push notifications are working perfectly! 💕",
       {
         type: "test",
         timestamp: new Date().toISOString(),
+        url: "/dashboard",
       }
     );
 
@@ -334,13 +363,20 @@ router.post("/test", authenticate, async (req, res) => {
       message: result.success
         ? `Test notification sent to ${result.sentTo} device(s)`
         : "Failed to send test notification",
-      details: result,
+      details: {
+        sentTo: result.sentTo,
+        totalDevices: result.totalDevices,
+        failed: result.failed,
+        simulated: result.simulated,
+        error: result.error,
+      },
     });
   } catch (error) {
     console.error("Test notification error:", error);
     res.status(500).json({
       success: false,
       message: "Error sending test notification",
+      error: error.message,
     });
   }
 });
@@ -359,8 +395,10 @@ router.post(
   ],
   async (req, res) => {
     try {
-      // Check if user is admin (implement your admin check logic)
-      if (!req.user.isAdmin) {
+      // TODO: Implement proper admin check
+      const isAdmin = req.user.email === "admin@habibi.com"; // Replace with your admin logic
+
+      if (!isAdmin) {
         return res.status(403).json({
           success: false,
           message: "Admin access required",
@@ -392,8 +430,8 @@ router.post(
         // Send to topic
         result = await pushNotificationService.sendToTopic(
           topic,
-          { title, body, type: "admin_broadcast" },
-          data
+          { title, body },
+          { ...data, type: "admin_broadcast" }
         );
       } else {
         return res.status(400).json({
@@ -414,6 +452,7 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Error sending custom notification",
+        error: error.message,
       });
     }
   }
@@ -429,10 +468,12 @@ router.get("/health", authenticate, async (req, res) => {
     res.json({
       success: true,
       health,
-      firebase: {
-        initialized: health.healthy,
-        projectId: process.env.FIREBASE_PROJECT_ID ? "configured" : "missing",
-        credentials: process.env.FIREBASE_PRIVATE_KEY
+      environment: {
+        nodeEnv: process.env.NODE_ENV || "development",
+        firebaseProjectId: process.env.FIREBASE_PROJECT_ID
+          ? "configured"
+          : "missing",
+        firebaseCredentials: process.env.FIREBASE_PRIVATE_KEY
           ? "configured"
           : "missing",
       },
@@ -442,6 +483,7 @@ router.get("/health", authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error checking health",
+      error: error.message,
     });
   }
 });
@@ -452,33 +494,14 @@ router.get("/health", authenticate, async (req, res) => {
 router.get("/stats", authenticate, async (req, res) => {
   try {
     const userId = req.user._id;
-    const user = await User.findById(userId).select("deviceTokens settings");
+    const stats = await pushNotificationService.getNotificationStats(userId);
 
-    if (!user) {
+    if (!stats) {
       return res.status(404).json({
         success: false,
         message: "User not found",
       });
     }
-
-    const stats = {
-      totalDevices: user.deviceTokens?.length || 0,
-      activeDevices: user.deviceTokens?.filter((d) => d.isActive)?.length || 0,
-      platforms: {
-        web:
-          user.deviceTokens?.filter((d) => d.platform === "web")?.length || 0,
-        android:
-          user.deviceTokens?.filter((d) => d.platform === "android")?.length ||
-          0,
-        ios:
-          user.deviceTokens?.filter((d) => d.platform === "ios")?.length || 0,
-      },
-      preferences: user.settings?.notifications || {},
-      lastRegistration:
-        user.deviceTokens?.length > 0
-          ? Math.max(...user.deviceTokens.map((d) => new Date(d.registeredAt)))
-          : null,
-    };
 
     res.json({
       success: true,
@@ -489,8 +512,34 @@ router.get("/stats", authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error fetching stats",
+      error: error.message,
     });
   }
 });
+
+// Helper functions
+function getBrowserFromUserAgent(userAgent) {
+  if (!userAgent) return "Unknown";
+
+  if (userAgent.includes("Chrome")) return "Chrome";
+  if (userAgent.includes("Firefox")) return "Firefox";
+  if (userAgent.includes("Safari")) return "Safari";
+  if (userAgent.includes("Edge")) return "Edge";
+  if (userAgent.includes("Opera")) return "Opera";
+
+  return "Unknown";
+}
+
+function getOSFromUserAgent(userAgent) {
+  if (!userAgent) return "Unknown";
+
+  if (userAgent.includes("Windows")) return "Windows";
+  if (userAgent.includes("Mac OS")) return "macOS";
+  if (userAgent.includes("Linux")) return "Linux";
+  if (userAgent.includes("Android")) return "Android";
+  if (userAgent.includes("iOS")) return "iOS";
+
+  return "Unknown";
+}
 
 module.exports = router;
