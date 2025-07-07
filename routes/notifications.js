@@ -1,204 +1,361 @@
-// routes/notifications.js
-
 const express = require("express");
+const { body, validationResult } = require("express-validator");
 const { authenticate } = require("../middleware/auth");
 const User = require("../models/User");
+const Notification = require("../models/Notification");
 
 const router = express.Router();
 
-// Send push notification to a user
-async function sendPushNotification(userId, notification) {
+// @route   GET /api/notifications/history
+// @desc    Get user's notification history with pagination
+// @access  Private
+router.get("/history", authenticate, async (req, res) => {
   try {
-    // Get user's notification preferences
-    const user = await User.findById(userId);
-    if (!user || !user.isActive) {
-      console.log(
-        `User ${userId} not found or inactive, skipping notification`
-      );
-      return false;
+    const {
+      limit = 10,
+      page = 1,
+      filter = "all", // all, unread, read
+      type = "all", // all, match, message, like, super_like, profile_view, system
+    } = req.query;
+
+    const userId = req.user._id;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Build query
+    let query = { user: userId };
+
+    // Apply filters
+    if (filter === "unread") {
+      query.isRead = false;
+    } else if (filter === "read") {
+      query.isRead = true;
     }
 
-    // Check if user has notifications enabled
-    if (!user.settings?.notifications?.push) {
-      console.log(`Push notifications disabled for user ${userId}`);
-      return false;
+    if (type !== "all") {
+      query.type = type;
     }
 
-    // Check notification type preferences
-    const notificationType = notification.type;
-    if (
-      notificationType === "new_match" &&
-      !user.settings?.notifications?.matches
-    ) {
-      console.log(`Match notifications disabled for user ${userId}`);
-      return false;
-    }
-    if (
-      notificationType === "new_like" &&
-      !user.settings?.notifications?.likes
-    ) {
-      console.log(`Like notifications disabled for user ${userId}`);
-      return false;
-    }
-    if (
-      notificationType === "new_message" &&
-      !user.settings?.notifications?.messages
-    ) {
-      console.log(`Message notifications disabled for user ${userId}`);
-      return false;
-    }
+    // Get notifications with pagination
+    const [notifications, totalCount] = await Promise.all([
+      Notification.find(query)
+        .populate("relatedUser", "firstName lastName photos")
+        .populate("relatedMatch", "users matchedAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Notification.countDocuments(query),
+    ]);
 
-    // TODO: Implement actual push notification service
-    // This is a placeholder for the actual push notification implementation
-    // You would integrate with services like:
-    // - Firebase Cloud Messaging (FCM)
-    // - Apple Push Notification Service (APNS)
-    // - Expo Push Notifications
-    // - OneSignal
-    // - Pusher
+    // Get unread count
+    const unreadCount = await Notification.countDocuments({
+      user: userId,
+      isRead: false,
+    });
 
-    console.log(`📱 Push notification sent to user ${userId}:`, {
-      title: notification.title,
-      body: notification.body,
+    // Format notifications
+    const formattedNotifications = notifications.map((notification) => ({
+      _id: notification._id,
       type: notification.type,
+      title: notification.title,
+      message: notification.message,
+      isRead: notification.isRead,
+      createdAt: notification.createdAt,
       data: notification.data,
+      relatedUser: notification.relatedUser
+        ? {
+            _id: notification.relatedUser._id,
+            firstName: notification.relatedUser.firstName,
+            lastName: notification.relatedUser.lastName,
+            primaryPhoto:
+              notification.relatedUser.photos?.find((p) => p.isPrimary) ||
+              notification.relatedUser.photos?.[0],
+          }
+        : null,
+      relatedMatch: notification.relatedMatch
+        ? {
+            _id: notification.relatedMatch._id,
+            matchedAt: notification.relatedMatch.matchedAt,
+          }
+        : null,
+    }));
+
+    res.json({
+      success: true,
+      notifications: formattedNotifications,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(totalCount / parseInt(limit)),
+        totalCount,
+        hasMore: skip + formattedNotifications.length < totalCount,
+      },
+      summary: {
+        unreadCount,
+        totalCount,
+      },
     });
-
-    // For now, we'll just log the notification
-    // In a real implementation, you would:
-    // 1. Get the user's device tokens
-    // 2. Send to push notification service
-    // 3. Handle delivery status
-    // 4. Store notification history
-
-    return true;
   } catch (error) {
-    console.error(`Error sending push notification to user ${userId}:`, error);
-    return false;
+    console.error("Get notifications history error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching notifications",
+    });
   }
-}
+});
 
-// @route   POST /api/notifications/register-device
-// @desc    Register a device for push notifications
+// @route   POST /api/notifications/subscribe
+// @desc    Subscribe to push notifications
 // @access  Private
-router.post("/register-device", authenticate, async (req, res) => {
-  try {
-    const { deviceToken, platform, appVersion } = req.body;
+router.post(
+  "/subscribe",
+  authenticate,
+  [
+    body("subscription")
+      .isObject()
+      .withMessage("Subscription object is required"),
+    body("subscription.endpoint")
+      .isURL()
+      .withMessage("Valid endpoint URL is required"),
+    body("subscription.keys")
+      .isObject()
+      .withMessage("Subscription keys are required"),
+    body("subscription.keys.p256dh")
+      .isString()
+      .withMessage("p256dh key is required"),
+    body("subscription.keys.auth")
+      .isString()
+      .withMessage("auth key is required"),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
 
-    if (!deviceToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Device token is required",
-      });
-    }
+      const { subscription, deviceInfo } = req.body;
+      const userId = req.user._id;
 
-    // Update user's device information
-    await User.findByIdAndUpdate(req.user._id, {
-      $addToSet: {
-        "settings.devices": {
-          token: deviceToken,
-          platform: platform || "unknown",
-          appVersion: appVersion || "1.0.0",
-          registeredAt: new Date(),
-          lastUsed: new Date(),
+      // Update user's push subscription
+      const user = await User.findByIdAndUpdate(
+        userId,
+        {
+          $set: {
+            "settings.pushSubscription": {
+              ...subscription,
+              subscribedAt: new Date(),
+              deviceInfo: deviceInfo || {},
+            },
+          },
         },
-      },
+        { new: true }
+      );
+
+      // Create a welcome notification
+      await createNotification({
+        user: userId,
+        type: "system",
+        title: "Push notifications enabled",
+        message:
+          "You'll now receive push notifications for matches and messages!",
+        data: {
+          type: "push_subscription",
+          enabled: true,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: "Push notifications subscription successful",
+        subscription: {
+          endpoint: subscription.endpoint,
+          subscribedAt: new Date(),
+        },
+      });
+    } catch (error) {
+      console.error("Push subscription error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error subscribing to push notifications",
+      });
+    }
+  }
+);
+
+// @route   DELETE /api/notifications/subscribe
+// @desc    Unsubscribe from push notifications
+// @access  Private
+router.delete("/subscribe", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Remove push subscription
+    await User.findByIdAndUpdate(userId, {
+      $unset: { "settings.pushSubscription": 1 },
     });
 
     res.json({
       success: true,
-      message: "Device registered successfully",
+      message: "Successfully unsubscribed from push notifications",
     });
   } catch (error) {
-    console.error("Device registration error:", error);
+    console.error("Push unsubscribe error:", error);
     res.status(500).json({
       success: false,
-      message: "Error registering device",
+      message: "Error unsubscribing from push notifications",
     });
   }
 });
 
-// @route   POST /api/notifications/unregister-device
-// @desc    Unregister a device from push notifications
+// @route   PUT /api/notifications/:notificationId/read
+// @desc    Mark a notification as read
 // @access  Private
-router.post("/unregister-device", authenticate, async (req, res) => {
+router.put("/:notificationId/read", authenticate, async (req, res) => {
   try {
-    const { deviceToken } = req.body;
+    const { notificationId } = req.params;
+    const userId = req.user._id;
 
-    if (!deviceToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Device token is required",
-      });
-    }
-
-    // Remove device from user's devices
-    await User.findByIdAndUpdate(req.user._id, {
-      $pull: {
-        "settings.devices": { token: deviceToken },
-      },
-    });
-
-    res.json({
-      success: true,
-      message: "Device unregistered successfully",
-    });
-  } catch (error) {
-    console.error("Device unregistration error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error unregistering device",
-    });
-  }
-});
-
-// @route   PUT /api/notifications/settings
-// @desc    Update notification settings
-// @access  Private
-router.put("/settings", authenticate, async (req, res) => {
-  try {
-    const { notifications } = req.body;
-
-    if (!notifications || typeof notifications !== "object") {
-      return res.status(400).json({
-        success: false,
-        message: "Notification settings are required",
-      });
-    }
-
-    // Update user's notification settings
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      { "settings.notifications": notifications },
+    const notification = await Notification.findOneAndUpdate(
+      { _id: notificationId, user: userId },
+      { isRead: true, readAt: new Date() },
       { new: true }
+    );
+
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        message: "Notification not found",
+      });
+    }
+
+    // Get updated unread count
+    const unreadCount = await Notification.countDocuments({
+      user: userId,
+      isRead: false,
+    });
+
+    res.json({
+      success: true,
+      message: "Notification marked as read",
+      unreadCount,
+    });
+  } catch (error) {
+    console.error("Mark notification read error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error marking notification as read",
+    });
+  }
+});
+
+// @route   PUT /api/notifications/read-all
+// @desc    Mark all notifications as read
+// @access  Private
+router.put("/read-all", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const result = await Notification.updateMany(
+      { user: userId, isRead: false },
+      { isRead: true, readAt: new Date() }
     );
 
     res.json({
       success: true,
-      message: "Notification settings updated successfully",
-      settings: user.settings.notifications,
+      message: `Marked ${result.modifiedCount} notifications as read`,
+      markedCount: result.modifiedCount,
+      unreadCount: 0,
     });
   } catch (error) {
-    console.error("Notification settings update error:", error);
+    console.error("Mark all notifications read error:", error);
     res.status(500).json({
       success: false,
-      message: "Error updating notification settings",
+      message: "Error marking all notifications as read",
+    });
+  }
+});
+
+// @route   DELETE /api/notifications/:notificationId
+// @desc    Delete a notification
+// @access  Private
+router.delete("/:notificationId", authenticate, async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    const userId = req.user._id;
+
+    const notification = await Notification.findOneAndDelete({
+      _id: notificationId,
+      user: userId,
+    });
+
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        message: "Notification not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Notification deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete notification error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error deleting notification",
+    });
+  }
+});
+
+// @route   DELETE /api/notifications/clear-all
+// @desc    Clear all notifications
+// @access  Private
+router.delete("/clear-all", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    const result = await Notification.deleteMany({ user: userId });
+
+    res.json({
+      success: true,
+      message: `Cleared ${result.deletedCount} notifications`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("Clear all notifications error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error clearing notifications",
     });
   }
 });
 
 // @route   GET /api/notifications/settings
-// @desc    Get user's notification settings
+// @desc    Get notification settings
 // @access  Private
 router.get("/settings", authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select(
-      "settings.notifications"
-    );
+    const user = await User.findById(req.user._id).select("settings");
+
+    const settings = user.settings?.notifications || {
+      matches: true,
+      messages: true,
+      likes: true,
+      email: true,
+      push: true,
+      sound: true,
+      vibration: true,
+    };
 
     res.json({
       success: true,
-      settings: user.settings?.notifications || {},
+      settings,
+      pushSubscribed: !!user.settings?.pushSubscription,
     });
   } catch (error) {
     console.error("Get notification settings error:", error);
@@ -209,44 +366,123 @@ router.get("/settings", authenticate, async (req, res) => {
   }
 });
 
-// @route   POST /api/notifications/test
-// @desc    Send a test notification to the current user
+// @route   PUT /api/notifications/settings
+// @desc    Update notification settings
 // @access  Private
-router.post("/test", authenticate, async (req, res) => {
-  try {
-    const {
-      title = "Test Notification",
-      body = "This is a test notification",
-    } = req.body;
+router.put(
+  "/settings",
+  authenticate,
+  [
+    body("notifications")
+      .isObject()
+      .withMessage("Notifications settings object is required"),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
 
-    const success = await sendPushNotification(req.user._id, {
-      title,
-      body,
-      type: "test",
-      data: { url: "/dashboard" },
-    });
+      const { notifications } = req.body;
+      const userId = req.user._id;
 
-    if (success) {
+      const user = await User.findByIdAndUpdate(
+        userId,
+        {
+          $set: {
+            "settings.notifications": notifications,
+          },
+        },
+        { new: true }
+      ).select("settings");
+
       res.json({
         success: true,
-        message: "Test notification sent successfully",
+        message: "Notification settings updated successfully",
+        settings: user.settings.notifications,
       });
-    } else {
-      res.status(400).json({
+    } catch (error) {
+      console.error("Update notification settings error:", error);
+      res.status(500).json({
         success: false,
-        message: "Failed to send test notification",
+        message: "Error updating notification settings",
       });
     }
+  }
+);
+
+// @route   GET /api/notifications/summary
+// @desc    Get notification summary
+// @access  Private
+router.get("/summary", authenticate, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Get notification counts by type
+    const summary = await Notification.aggregate([
+      { $match: { user: userId } },
+      {
+        $group: {
+          _id: "$type",
+          total: { $sum: 1 },
+          unread: {
+            $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] },
+          },
+        },
+      },
+    ]);
+
+    // Get overall counts
+    const [totalUnread, totalNotifications] = await Promise.all([
+      Notification.countDocuments({ user: userId, isRead: false }),
+      Notification.countDocuments({ user: userId }),
+    ]);
+
+    // Format summary
+    const formattedSummary = {
+      total: totalNotifications,
+      unread: totalUnread,
+      byType: {},
+    };
+
+    summary.forEach((item) => {
+      formattedSummary.byType[item._id] = {
+        total: item.total,
+        unread: item.unread,
+      };
+    });
+
+    res.json({
+      success: true,
+      summary: formattedSummary,
+    });
   } catch (error) {
-    console.error("Test notification error:", error);
+    console.error("Get notification summary error:", error);
     res.status(500).json({
       success: false,
-      message: "Error sending test notification",
+      message: "Error fetching notification summary",
     });
   }
 });
 
-module.exports = {
-  router,
-  sendPushNotification,
+// Helper function to create notifications
+const createNotification = async (notificationData) => {
+  try {
+    const notification = new Notification(notificationData);
+    await notification.save();
+    return notification;
+  } catch (error) {
+    console.error("Error creating notification:", error);
+    throw error;
+  }
 };
+
+// Export the createNotification function for use in other parts of the app
+router.createNotification = createNotification;
+
+module.exports = router;

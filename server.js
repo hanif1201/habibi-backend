@@ -541,10 +541,7 @@ app.use("/api/matching", asyncHandler(require("./routes/matching")));
 app.use("/api/chat", asyncHandler(require("./routes/chat")));
 app.use("/api/debug", asyncHandler(require("./routes/debug")));
 app.use("/api/safety", asyncHandler(require("./routes/safety")));
-app.use(
-  "/api/notifications",
-  asyncHandler(require("./routes/notifications").router)
-);
+app.use("/api/notifications", asyncHandler(require("./routes/notifications")));
 
 // ===== 404 HANDLER =====
 app.all("*", notFoundHandler);
