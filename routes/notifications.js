@@ -2,129 +2,76 @@ const express = require("express");
 const { body, validationResult } = require("express-validator");
 const { authenticate } = require("../middleware/auth");
 const User = require("../models/User");
-const Notification = require("../models/Notification");
 
 const router = express.Router();
 
-// @route   GET /api/notifications/history
-// @desc    Get user's notification history with pagination
+// @route   GET /api/notifications/preferences
+// @desc    Get user's notification preferences
 // @access  Private
-router.get("/history", authenticate, async (req, res) => {
+router.get("/preferences", authenticate, async (req, res) => {
   try {
-    const {
-      limit = 10,
-      page = 1,
-      filter = "all", // all, unread, read
-      type = "all", // all, match, message, like, super_like, profile_view, system
-    } = req.query;
+    const user = await User.findById(req.user._id).select("settings");
 
-    const userId = req.user._id;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const defaultPreferences = {
+      matches: true,
+      messages: true,
+      likes: true,
+      email: true,
+      push: true,
+      sound: true,
+      vibration: true,
+    };
 
-    // Build query
-    let query = { user: userId };
-
-    // Apply filters
-    if (filter === "unread") {
-      query.isRead = false;
-    } else if (filter === "read") {
-      query.isRead = true;
-    }
-
-    if (type !== "all") {
-      query.type = type;
-    }
-
-    // Get notifications with pagination
-    const [notifications, totalCount] = await Promise.all([
-      Notification.find(query)
-        .populate("relatedUser", "firstName lastName photos")
-        .populate("relatedMatch", "users matchedAt")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit))
-        .lean(),
-      Notification.countDocuments(query),
-    ]);
-
-    // Get unread count
-    const unreadCount = await Notification.countDocuments({
-      user: userId,
-      isRead: false,
-    });
-
-    // Format notifications
-    const formattedNotifications = notifications.map((notification) => ({
-      _id: notification._id,
-      type: notification.type,
-      title: notification.title,
-      message: notification.message,
-      isRead: notification.isRead,
-      createdAt: notification.createdAt,
-      data: notification.data,
-      relatedUser: notification.relatedUser
-        ? {
-            _id: notification.relatedUser._id,
-            firstName: notification.relatedUser.firstName,
-            lastName: notification.relatedUser.lastName,
-            primaryPhoto:
-              notification.relatedUser.photos?.find((p) => p.isPrimary) ||
-              notification.relatedUser.photos?.[0],
-          }
-        : null,
-      relatedMatch: notification.relatedMatch
-        ? {
-            _id: notification.relatedMatch._id,
-            matchedAt: notification.relatedMatch.matchedAt,
-          }
-        : null,
-    }));
+    const preferences = user?.settings?.notifications || defaultPreferences;
 
     res.json({
       success: true,
-      notifications: formattedNotifications,
-      pagination: {
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(totalCount / parseInt(limit)),
-        totalCount,
-        hasMore: skip + formattedNotifications.length < totalCount,
-      },
-      summary: {
-        unreadCount,
-        totalCount,
-      },
+      preferences,
     });
   } catch (error) {
-    console.error("Get notifications history error:", error);
+    console.error("Get notification preferences error:", error);
     res.status(500).json({
       success: false,
-      message: "Error fetching notifications",
+      message: "Error fetching notification preferences",
     });
   }
 });
 
-// @route   POST /api/notifications/subscribe
-// @desc    Subscribe to push notifications
+// @route   PUT /api/notifications/preferences
+// @desc    Update user's notification preferences
 // @access  Private
-router.post(
-  "/subscribe",
+router.put(
+  "/preferences",
   authenticate,
   [
-    body("subscription")
-      .isObject()
-      .withMessage("Subscription object is required"),
-    body("subscription.endpoint")
-      .isURL()
-      .withMessage("Valid endpoint URL is required"),
-    body("subscription.keys")
-      .isObject()
-      .withMessage("Subscription keys are required"),
-    body("subscription.keys.p256dh")
-      .isString()
-      .withMessage("p256dh key is required"),
-    body("subscription.keys.auth")
-      .isString()
-      .withMessage("auth key is required"),
+    body("preferences.matches")
+      .optional()
+      .isBoolean()
+      .withMessage("Matches preference must be a boolean"),
+    body("preferences.messages")
+      .optional()
+      .isBoolean()
+      .withMessage("Messages preference must be a boolean"),
+    body("preferences.likes")
+      .optional()
+      .isBoolean()
+      .withMessage("Likes preference must be a boolean"),
+    body("preferences.email")
+      .optional()
+      .isBoolean()
+      .withMessage("Email preference must be a boolean"),
+    body("preferences.push")
+      .optional()
+      .isBoolean()
+      .withMessage("Push preference must be a boolean"),
+    body("preferences.sound")
+      .optional()
+      .isBoolean()
+      .withMessage("Sound preference must be a boolean"),
+    body("preferences.vibration")
+      .optional()
+      .isBoolean()
+      .withMessage("Vibration preference must be a boolean"),
   ],
   async (req, res) => {
     try {
@@ -137,114 +84,132 @@ router.post(
         });
       }
 
-      const { subscription, deviceInfo } = req.body;
-      const userId = req.user._id;
+      const { preferences } = req.body;
 
-      // Update user's push subscription
+      if (!preferences || typeof preferences !== "object") {
+        return res.status(400).json({
+          success: false,
+          message: "Preferences object is required",
+        });
+      }
+
+      // Update user's notification preferences
       const user = await User.findByIdAndUpdate(
-        userId,
+        req.user._id,
         {
           $set: {
-            "settings.pushSubscription": {
-              ...subscription,
-              subscribedAt: new Date(),
-              deviceInfo: deviceInfo || {},
-            },
+            "settings.notifications": preferences,
           },
         },
-        { new: true }
-      );
-
-      // Create a welcome notification
-      await createNotification({
-        user: userId,
-        type: "system",
-        title: "Push notifications enabled",
-        message:
-          "You'll now receive push notifications for matches and messages!",
-        data: {
-          type: "push_subscription",
-          enabled: true,
-        },
-      });
+        { new: true, upsert: false }
+      ).select("settings");
 
       res.json({
         success: true,
-        message: "Push notifications subscription successful",
-        subscription: {
-          endpoint: subscription.endpoint,
-          subscribedAt: new Date(),
-        },
+        message: "Notification preferences updated successfully",
+        preferences: user.settings.notifications,
       });
     } catch (error) {
-      console.error("Push subscription error:", error);
+      console.error("Update notification preferences error:", error);
       res.status(500).json({
         success: false,
-        message: "Error subscribing to push notifications",
+        message: "Error updating notification preferences",
       });
     }
   }
 );
 
-// @route   DELETE /api/notifications/subscribe
-// @desc    Unsubscribe from push notifications
+// @route   GET /api/notifications
+// @desc    Get user's notifications
 // @access  Private
-router.delete("/subscribe", authenticate, async (req, res) => {
+router.get("/", authenticate, async (req, res) => {
   try {
-    const userId = req.user._id;
+    const { limit = 50, skip = 0, unreadOnly = false } = req.query;
 
-    // Remove push subscription
-    await User.findByIdAndUpdate(userId, {
-      $unset: { "settings.pushSubscription": 1 },
-    });
+    // For now, return mock notifications since we don't have a Notification model
+    // In a real app, you'd query from a notifications collection
+    const mockNotifications = [
+      {
+        id: 1,
+        type: "match",
+        title: "New Match!",
+        message: "You have a new match with Sarah!",
+        timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000), // 2 hours ago
+        read: false,
+        data: {
+          matchId: "mock_match_id",
+          userId: "mock_user_id",
+        },
+      },
+      {
+        id: 2,
+        type: "message",
+        title: "New Message",
+        message: "Emma sent you a message",
+        timestamp: new Date(Date.now() - 5 * 60 * 60 * 1000), // 5 hours ago
+        read: true,
+        data: {
+          matchId: "mock_match_id_2",
+          userId: "mock_user_id_2",
+        },
+      },
+      {
+        id: 3,
+        type: "like",
+        title: "Someone Liked You!",
+        message: "You received a new like",
+        timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000), // 1 day ago
+        read: false,
+        data: {
+          userId: "mock_user_id_3",
+        },
+      },
+    ];
+
+    // Filter for unread only if requested
+    let notifications = unreadOnly
+      ? mockNotifications.filter((n) => !n.read)
+      : mockNotifications;
+
+    // Apply pagination
+    const startIndex = parseInt(skip);
+    const endIndex = startIndex + parseInt(limit);
+    notifications = notifications.slice(startIndex, endIndex);
+
+    const unreadCount = mockNotifications.filter((n) => !n.read).length;
 
     res.json({
       success: true,
-      message: "Successfully unsubscribed from push notifications",
+      notifications,
+      unreadCount,
+      total: mockNotifications.length,
     });
   } catch (error) {
-    console.error("Push unsubscribe error:", error);
+    console.error("Get notifications error:", error);
     res.status(500).json({
       success: false,
-      message: "Error unsubscribing from push notifications",
+      message: "Error fetching notifications",
     });
   }
 });
 
-// @route   PUT /api/notifications/:notificationId/read
+// @route   PUT /api/notifications/:id/read
 // @desc    Mark a notification as read
 // @access  Private
-router.put("/:notificationId/read", authenticate, async (req, res) => {
+router.put("/:id/read", authenticate, async (req, res) => {
   try {
-    const { notificationId } = req.params;
-    const userId = req.user._id;
+    const { id } = req.params;
 
-    const notification = await Notification.findOneAndUpdate(
-      { _id: notificationId, user: userId },
-      { isRead: true, readAt: new Date() },
-      { new: true }
-    );
-
-    if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message: "Notification not found",
-      });
-    }
-
-    // Get updated unread count
-    const unreadCount = await Notification.countDocuments({
-      user: userId,
-      isRead: false,
-    });
+    // In a real app, you'd update the notification in the database
+    // For now, just return success since we're using mock data
 
     res.json({
       success: true,
       message: "Notification marked as read",
-      unreadCount,
+      notificationId: id,
     });
   } catch (error) {
-    console.error("Mark notification read error:", error);
+    console.error("Mark notification as read error:", error);
     res.status(500).json({
       success: false,
       message: "Error marking notification as read",
@@ -257,21 +222,16 @@ router.put("/:notificationId/read", authenticate, async (req, res) => {
 // @access  Private
 router.put("/read-all", authenticate, async (req, res) => {
   try {
-    const userId = req.user._id;
-
-    const result = await Notification.updateMany(
-      { user: userId, isRead: false },
-      { isRead: true, readAt: new Date() }
-    );
+    // In a real app, you'd update all unread notifications for the user
+    // For now, just return success
 
     res.json({
       success: true,
-      message: `Marked ${result.modifiedCount} notifications as read`,
-      markedCount: result.modifiedCount,
-      unreadCount: 0,
+      message: "All notifications marked as read",
+      markedCount: 0, // Would be the actual count from database
     });
   } catch (error) {
-    console.error("Mark all notifications read error:", error);
+    console.error("Mark all notifications as read error:", error);
     res.status(500).json({
       success: false,
       message: "Error marking all notifications as read",
@@ -279,55 +239,21 @@ router.put("/read-all", authenticate, async (req, res) => {
   }
 });
 
-// @route   DELETE /api/notifications/:notificationId
-// @desc    Delete a notification
+// @route   DELETE /api/notifications/clear
+// @desc    Clear all notifications for the user
 // @access  Private
-router.delete("/:notificationId", authenticate, async (req, res) => {
+router.delete("/clear", authenticate, async (req, res) => {
   try {
-    const { notificationId } = req.params;
-    const userId = req.user._id;
-
-    const notification = await Notification.findOneAndDelete({
-      _id: notificationId,
-      user: userId,
-    });
-
-    if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message: "Notification not found",
-      });
-    }
+    // In a real app, you'd delete all notifications for the user
+    // For now, just return success
 
     res.json({
       success: true,
-      message: "Notification deleted successfully",
+      message: "All notifications cleared",
+      deletedCount: 0, // Would be the actual count from database
     });
   } catch (error) {
-    console.error("Delete notification error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error deleting notification",
-    });
-  }
-});
-
-// @route   DELETE /api/notifications/clear-all
-// @desc    Clear all notifications
-// @access  Private
-router.delete("/clear-all", authenticate, async (req, res) => {
-  try {
-    const userId = req.user._id;
-
-    const result = await Notification.deleteMany({ user: userId });
-
-    res.json({
-      success: true,
-      message: `Cleared ${result.deletedCount} notifications`,
-      deletedCount: result.deletedCount,
-    });
-  } catch (error) {
-    console.error("Clear all notifications error:", error);
+    console.error("Clear notifications error:", error);
     res.status(500).json({
       success: false,
       message: "Error clearing notifications",
@@ -335,154 +261,38 @@ router.delete("/clear-all", authenticate, async (req, res) => {
   }
 });
 
-// @route   GET /api/notifications/settings
-// @desc    Get notification settings
+// @route   POST /api/notifications/test
+// @desc    Send a test notification (for development)
 // @access  Private
-router.get("/settings", authenticate, async (req, res) => {
+router.post("/test", authenticate, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("settings");
+    const { type = "test", title, message } = req.body;
 
-    const settings = user.settings?.notifications || {
-      matches: true,
-      messages: true,
-      likes: true,
-      email: true,
-      push: true,
-      sound: true,
-      vibration: true,
-    };
+    // In a real app, this would create a notification and potentially send a push notification
+    console.log(`📱 Test notification for user ${req.user._id}:`, {
+      type,
+      title: title || "Test Notification",
+      message: message || "This is a test notification",
+      timestamp: new Date(),
+    });
 
     res.json({
       success: true,
-      settings,
-      pushSubscribed: !!user.settings?.pushSubscription,
-    });
-  } catch (error) {
-    console.error("Get notification settings error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Error fetching notification settings",
-    });
-  }
-});
-
-// @route   PUT /api/notifications/settings
-// @desc    Update notification settings
-// @access  Private
-router.put(
-  "/settings",
-  authenticate,
-  [
-    body("notifications")
-      .isObject()
-      .withMessage("Notifications settings object is required"),
-  ],
-  async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation failed",
-          errors: errors.array(),
-        });
-      }
-
-      const { notifications } = req.body;
-      const userId = req.user._id;
-
-      const user = await User.findByIdAndUpdate(
-        userId,
-        {
-          $set: {
-            "settings.notifications": notifications,
-          },
-        },
-        { new: true }
-      ).select("settings");
-
-      res.json({
-        success: true,
-        message: "Notification settings updated successfully",
-        settings: user.settings.notifications,
-      });
-    } catch (error) {
-      console.error("Update notification settings error:", error);
-      res.status(500).json({
-        success: false,
-        message: "Error updating notification settings",
-      });
-    }
-  }
-);
-
-// @route   GET /api/notifications/summary
-// @desc    Get notification summary
-// @access  Private
-router.get("/summary", authenticate, async (req, res) => {
-  try {
-    const userId = req.user._id;
-
-    // Get notification counts by type
-    const summary = await Notification.aggregate([
-      { $match: { user: userId } },
-      {
-        $group: {
-          _id: "$type",
-          total: { $sum: 1 },
-          unread: {
-            $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] },
-          },
-        },
+      message: "Test notification sent",
+      notification: {
+        type,
+        title: title || "Test Notification",
+        message: message || "This is a test notification",
+        timestamp: new Date(),
       },
-    ]);
-
-    // Get overall counts
-    const [totalUnread, totalNotifications] = await Promise.all([
-      Notification.countDocuments({ user: userId, isRead: false }),
-      Notification.countDocuments({ user: userId }),
-    ]);
-
-    // Format summary
-    const formattedSummary = {
-      total: totalNotifications,
-      unread: totalUnread,
-      byType: {},
-    };
-
-    summary.forEach((item) => {
-      formattedSummary.byType[item._id] = {
-        total: item.total,
-        unread: item.unread,
-      };
-    });
-
-    res.json({
-      success: true,
-      summary: formattedSummary,
     });
   } catch (error) {
-    console.error("Get notification summary error:", error);
+    console.error("Send test notification error:", error);
     res.status(500).json({
       success: false,
-      message: "Error fetching notification summary",
+      message: "Error sending test notification",
     });
   }
 });
-
-// Helper function to create notifications
-const createNotification = async (notificationData) => {
-  try {
-    const notification = new Notification(notificationData);
-    await notification.save();
-    return notification;
-  } catch (error) {
-    console.error("Error creating notification:", error);
-    throw error;
-  }
-};
-
-// Export the createNotification function for use in other parts of the app
-router.createNotification = createNotification;
 
 module.exports = router;
