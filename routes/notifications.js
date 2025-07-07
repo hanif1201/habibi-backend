@@ -517,6 +517,52 @@ router.get("/stats", authenticate, async (req, res) => {
   }
 });
 
+// Export sendPushNotification function for backward compatibility
+const sendPushNotification = async (userId, notificationData) => {
+  try {
+    // Check notification type and route accordingly
+    if (notificationData.type === "message") {
+      return await pushNotificationService.sendMessageNotification(userId, {
+        messageId: notificationData.data?.messageId,
+        matchId: notificationData.data?.matchId,
+        senderId: notificationData.data?.senderId,
+        senderName: notificationData.data?.senderName || "Someone",
+        senderPhoto: notificationData.icon,
+        content: notificationData.body,
+        unreadCount: notificationData.badge || 1,
+      });
+    } else if (notificationData.type === "match") {
+      return await pushNotificationService.sendMatchNotification(userId, {
+        matchId: notificationData.data?.matchId,
+        matchedUserId: notificationData.data?.userId,
+        matchedUserName: notificationData.data?.userName || "Someone",
+        matchedUserPhoto: notificationData.icon,
+      });
+    } else if (
+      notificationData.type === "like" ||
+      notificationData.type === "super_like"
+    ) {
+      return await pushNotificationService.sendLikeNotification(userId, {
+        likerId: notificationData.data?.likerId,
+        likerName: notificationData.data?.likerName || "Someone",
+        likerPhoto: notificationData.icon,
+        isSuper: notificationData.type === "super_like",
+      });
+    } else {
+      // Generic notification
+      return await pushNotificationService.sendGenericNotification(
+        userId,
+        notificationData.title,
+        notificationData.body,
+        notificationData.data || {}
+      );
+    }
+  } catch (error) {
+    console.error("Send push notification error:", error);
+    return { success: false, error: error.message };
+  }
+};
+
 // Helper functions
 function getBrowserFromUserAgent(userAgent) {
   if (!userAgent) return "Unknown";
@@ -542,4 +588,4 @@ function getOSFromUserAgent(userAgent) {
   return "Unknown";
 }
 
-module.exports = router;
+module.exports = { router, sendPushNotification };

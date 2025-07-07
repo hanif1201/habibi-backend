@@ -5,7 +5,6 @@ const User = require("../models/User");
 const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
-const { sendPushNotification } = require("./notifications");
 const pushNotificationService = require("../services/pushNotificationService");
 
 const router = express.Router();
@@ -1083,119 +1082,51 @@ router.post("/cleanup-expired", authenticate, async (req, res) => {
   }
 });
 
+// @route   DELETE /api/matching/matches/:matchId
+// @desc    Unmatch/delete a match
+// @access  Private
+router.delete("/matches/:matchId", authenticate, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+
+    const match = await Match.findById(matchId);
+    if (!match) {
+      return res.status(404).json({
+        success: false,
+        message: "Match not found",
+      });
+    }
+
+    if (!match.users.includes(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      });
+    }
+
+    // Delete the match
+    await match.unmatch();
+
+    // Optionally delete associated messages
+    await Message.updateMany(
+      { match: matchId },
+      { isDeleted: true, deletedAt: new Date() }
+    );
+
+    res.json({
+      success: true,
+      message: "Match deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete match error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error deleting match",
+    });
+  }
+});
+
 // Helper functions
-function isMutualInterest(user1, user2) {
-  // Check if user2 would be interested in user1
-  if (
-    user2.preferences?.interestedIn &&
-    user2.preferences.interestedIn !== "both"
-  ) {
-    if (user2.preferences.interestedIn !== user1.gender) {
-      return false;
-    }
-  }
-
-  // Check age preference of user2
-  if (user2.preferences?.ageRange) {
-    const user1Age = calculateAge(user1.dateOfBirth);
-    if (
-      user1Age < user2.preferences.ageRange.min ||
-      user1Age > user2.preferences.ageRange.max
-    ) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function calculateAge(dateOfBirth) {
-  if (!dateOfBirth) return 0;
-  const today = new Date();
-  const birthDate = new Date(dateOfBirth);
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const monthDiff = today.getMonth() - birthDate.getMonth();
-
-  if (
-    monthDiff < 0 ||
-    (monthDiff === 0 && today.getDate() < birthDate.getDate())
-  ) {
-    age--;
-  }
-  return age;
-}
-
-function calculateDistance(coords1, coords2) {
-  const [lon1, lat1] = coords1;
-  const [lon2, lat2] = coords2;
-
-  const R = 6371; // Earth's radius in kilometers
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-function calculateUserDistance(user1, user2) {
-  if (!user1.location?.coordinates || !user2.location?.coordinates) {
-    return null;
-  }
-  return Math.round(
-    calculateDistance(user1.location.coordinates, user2.location.coordinates)
-  );
-}
-
-function calculateCompatibilityScore(user1, user2) {
-  let score = 50; // Base score
-
-  // Age compatibility (closer ages = higher score)
-  const ageDiff = Math.abs(
-    calculateAge(user1.dateOfBirth) - calculateAge(user2.dateOfBirth)
-  );
-  if (ageDiff <= 3) score += 20;
-  else if (ageDiff <= 5) score += 15;
-  else if (ageDiff <= 10) score += 10;
-
-  // Bio similarity (if both have bios)
-  if (
-    user1.bio &&
-    user2.bio &&
-    user1.bio.length > 20 &&
-    user2.bio.length > 20
-  ) {
-    score += 15;
-  }
-
-  // Photo count (more photos = more serious)
-  if (user2.photos && user2.photos.length >= 3) {
-    score += 10;
-  }
-
-  // Verification status
-  if (user2.verification?.isVerified) {
-    score += 15;
-  }
-
-  // Recent activity
-  if (isUserRecentlyActive(user2.lastActive)) {
-    score += 10;
-  }
-
-  return Math.min(100, score);
-}
-
-function isUserRecentlyActive(lastActive) {
-  if (!lastActive) return false;
-  const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
-  return new Date(lastActive) > fifteenMinutesAgo;
-}
-
 function calculateProfileCompletionScore(user) {
   let score = 0;
   const maxScore = 100;
@@ -1286,18 +1217,19 @@ async function sendExpiringMatchNotifications(userId) {
         (match.expiresAt - new Date()) / (1000 * 60 * 60)
       ); // Hours
 
-      await sendPushNotification(userId, {
-        title: "⏰ Match Expiring Soon",
-        body: `Your match with ${otherUser.firstName} expires in ${timeLeft} hours`,
-        type: "match_expiring",
-        userName: otherUser.firstName,
-        timeLeft: `${timeLeft} hours`,
-        data: {
+      await pushNotificationService.sendGenericNotification(
+        userId,
+        "⏰ Match Expiring Soon",
+        `Your match with ${otherUser.firstName} expires in ${timeLeft} hours`,
+        {
+          type: "match_expiring",
+          userName: otherUser.firstName,
+          timeLeft: `${timeLeft} hours`,
           url: "/chat",
           matchId: match._id,
           userId: otherUser._id,
-        },
-      });
+        }
+      );
     }
   } catch (error) {
     console.error("Error sending expiring match notifications:", error);

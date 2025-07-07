@@ -249,6 +249,16 @@ const startCleanupJobs = () => {
     }
   });
 
+  // Clean up old device tokens every week
+  cron.schedule("0 0 * * 0", async () => {
+    try {
+      const User = require("./models/User");
+      await User.cleanupAllDeviceTokens(30); // Remove tokens older than 30 days
+    } catch (error) {
+      console.error("❌ Error in device token cleanup job:", error);
+    }
+  });
+
   console.log("✅ Cleanup jobs scheduled");
 };
 
@@ -311,6 +321,13 @@ app.get("/health", (req, res) => {
     uptime: process.uptime(),
     environment: process.env.NODE_ENV || "development",
     onlineUsers: io.getOnlineUserCount ? io.getOnlineUserCount() : 0,
+    version: "1.0.0",
+    features: {
+      pushNotifications: !!process.env.FIREBASE_PROJECT_ID,
+      fileUpload: !!process.env.CLOUDINARY_CLOUD_NAME,
+      realTimeChat: true,
+      matching: true,
+    },
   });
 });
 
@@ -320,7 +337,8 @@ app.use("/api/photos", require("./routes/photos"));
 app.use("/api/profile", require("./routes/profile"));
 app.use("/api/matching", require("./routes/matching"));
 app.use("/api/chat", require("./routes/chat"));
-app.use("/api/notifications", require("./routes/notifications")); // ADD THIS LINE
+app.use("/api/notifications", require("./routes/notifications").router);
+app.use("/api/safety", require("./routes/safety"));
 app.use("/api/debug", require("./routes/debug"));
 
 // ===== ERROR HANDLERS =====
@@ -337,7 +355,8 @@ app.use("*", (req, res) => {
       "/api/profile/*",
       "/api/matching/*",
       "/api/chat/*",
-      "/api/notifications/*", // ADD THIS LINE
+      "/api/notifications/*",
+      "/api/safety/*",
       "/api/debug/*",
     ],
   });
@@ -378,8 +397,23 @@ const startServer = async () => {
       console.log("  • /api/photos/* - Photo management");
       console.log("  • /api/matching/* - Discover, swipe, matches");
       console.log("  • /api/chat/* - Real-time messaging");
-      console.log("  • /api/notifications/* - Push notifications"); // ADD THIS LINE
+      console.log("  • /api/notifications/* - Push notifications");
+      console.log("  • /api/safety/* - Safety & blocking features");
       console.log("  • /api/debug/* - Debug endpoints");
+      console.log("");
+      console.log("🔥 Features Status:");
+      console.log(
+        `  • Push Notifications: ${
+          process.env.FIREBASE_PROJECT_ID ? "✅ Enabled" : "⚠️  Simulated"
+        }`
+      );
+      console.log(
+        `  • File Upload: ${
+          process.env.CLOUDINARY_CLOUD_NAME ? "✅ Enabled" : "❌ Disabled"
+        }`
+      );
+      console.log(`  • Real-time Chat: ✅ Enabled`);
+      console.log(`  • User Matching: ✅ Enabled`);
       console.log("");
       console.log("✅ Server is ready! Time to find love! 💕");
     });
@@ -403,6 +437,21 @@ process.on("uncaughtException", (err) => {
   console.error("❌ UNCAUGHT EXCEPTION! 💥 Shutting down...");
   console.error(err.name, err.message);
   process.exit(1);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("👋 SIGTERM received. Shutting down gracefully...");
+  server.close(() => {
+    console.log("💤 Process terminated");
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("👋 SIGINT received. Shutting down gracefully...");
+  server.close(() => {
+    console.log("💤 Process terminated");
+  });
 });
 
 // Start the server
