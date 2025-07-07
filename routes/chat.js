@@ -5,6 +5,7 @@ const { authenticate } = require("../middleware/auth");
 const Message = require("../models/Message");
 const Match = require("../models/Match");
 const User = require("../models/User");
+const pushNotificationService = require("../services/pushNotificationService");
 
 const router = express.Router();
 
@@ -172,13 +173,55 @@ router.post(
           isFirstMessage,
         });
 
-        // Send push notification if user is offline
+        // Send push notification if user is offline - REPLACE CONSOLE.LOG
         const isReceiverOnline = req.io.isUserOnline?.(
           otherUser._id.toString()
         );
+
         if (!isReceiverOnline && otherUser.settings?.notifications?.messages) {
-          // TODO: Send push notification
-          console.log(`📱 Message notification for ${otherUser.firstName}`);
+          // Get sender's photo for notification
+          const senderPhoto =
+            req.user.photos?.find((p) => p.isPrimary)?.url ||
+            req.user.photos?.[0]?.url ||
+            "";
+
+          // Get unread count for badge
+          const unreadCount = await Message.getUnreadCount(otherUser._id);
+
+          // Send actual push notification
+          try {
+            const notificationResult =
+              await pushNotificationService.sendMessageNotification(
+                otherUser._id,
+                {
+                  messageId: message._id.toString(),
+                  matchId: matchId,
+                  senderId: req.user._id.toString(),
+                  senderName: req.user.firstName,
+                  senderPhoto: senderPhoto,
+                  content: message.content,
+                  unreadCount: unreadCount,
+                }
+              );
+
+            if (notificationResult.success) {
+              console.log(
+                `📱 Message notification sent to ${otherUser.firstName} (${notificationResult.sentTo} devices)`
+              );
+
+              // Update notification stats
+              await User.findByIdAndUpdate(otherUser._id, {
+                $inc: { "notificationStats.sent": 1 },
+                $set: { "notificationStats.lastNotificationSent": new Date() },
+              });
+            } else {
+              console.log(
+                `❌ Failed to send notification to ${otherUser.firstName}: ${notificationResult.error}`
+              );
+            }
+          } catch (notificationError) {
+            console.error("Push notification error:", notificationError);
+          }
         }
 
         if (isFirstMessage) {
@@ -858,6 +901,155 @@ router.get("/unread-summary", authenticate, async (req, res) => {
     });
   }
 });
+
+// @route   POST /api/chat/notifications/message-opened
+// @desc    Handle notification interactions when message is opened
+// @access  Private
+router.post(
+  "/notifications/message-opened",
+  authenticate,
+  [body("messageId").isMongoId().withMessage("Valid message ID required")],
+  async (req, res) => {
+    try {
+      const { messageId } = req.body;
+      const userId = req.user._id;
+
+      // Mark message as read
+      const message = await Message.findById(messageId);
+      if (message && message.receiver.toString() === userId.toString()) {
+        await message.markAsRead();
+
+        // Update user notification stats
+        await User.findByIdAndUpdate(userId, {
+          $inc: { "notificationStats.clicked": 1 },
+          $set: { "notificationStats.lastNotificationClicked": new Date() },
+        });
+
+        // Emit read receipt
+        if (req.io) {
+          req.io.to(`match_${message.match}`).emit("message_read", {
+            messageId: message._id,
+            readBy: userId,
+            readAt: message.readAt,
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        message: "Message interaction recorded",
+      });
+    } catch (error) {
+      console.error("Message interaction error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error recording interaction",
+      });
+    }
+  }
+);
+
+// @route   POST /api/chat/:matchId/mark-read
+// @desc    Mark all messages in a conversation as read
+// @access  Private
+router.post("/:matchId/mark-read", authenticate, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const userId = req.user._id;
+
+    // Verify user is part of this match
+    const match = await Match.findById(matchId);
+    if (!match || !match.users.includes(userId)) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied to this conversation",
+      });
+    }
+
+    // Mark all unread messages as read
+    const result = await Message.markConversationAsRead(matchId, userId);
+
+    // Emit read receipt for real-time updates
+    if (req.io && result.modifiedCount > 0) {
+      req.io.to(`match_${matchId}`).emit("messages_read", {
+        matchId,
+        readBy: userId,
+        readAt: new Date(),
+        messagesRead: result.modifiedCount,
+      });
+    }
+
+    res.json({
+      success: true,
+      messagesRead: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Mark read error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error marking messages as read",
+    });
+  }
+});
+
+// @route   POST /api/chat/notifications/delivered
+// @desc    Confirm notification delivery
+// @access  Private
+router.post(
+  "/notifications/delivered",
+  authenticate,
+  [
+    body("notificationId").notEmpty().withMessage("Notification ID required"),
+    body("messageId").optional().isMongoId().withMessage("Invalid message ID"),
+  ],
+  async (req, res) => {
+    try {
+      const { notificationId, messageId } = req.body;
+      const userId = req.user._id;
+
+      // Update delivery stats
+      await User.findByIdAndUpdate(userId, {
+        $inc: { "notificationStats.delivered": 1 },
+      });
+
+      // Log for analytics
+      console.log(
+        `📱 Notification delivered: ${notificationId} to user ${userId}`
+      );
+
+      res.json({
+        success: true,
+        message: "Delivery confirmed",
+      });
+    } catch (error) {
+      console.error("Delivery confirmation error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Error confirming delivery",
+      });
+    }
+  }
+);
+
+// Helper middleware to attach user data to requests
+const attachUserData = async (req, res, next) => {
+  try {
+    if (req.user) {
+      const fullUser = await User.findById(req.user._id)
+        .select(
+          "firstName lastName photos settings deviceTokens notificationStats"
+        )
+        .lean();
+      req.userFull = fullUser;
+    }
+    next();
+  } catch (error) {
+    next();
+  }
+};
+
+// Apply middleware to routes that might need push notifications
+router.use(attachUserData);
 
 // Helper functions
 function filterInappropriateContent(content) {

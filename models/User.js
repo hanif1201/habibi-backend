@@ -214,6 +214,36 @@ const UserSchema = new mongoose.Schema(
           type: Boolean,
           default: true,
         },
+        // Time-based preferences
+        quietHours: {
+          enabled: {
+            type: Boolean,
+            default: false,
+          },
+          start: {
+            type: String, // "22:00"
+            default: "22:00",
+          },
+          end: {
+            type: String, // "07:00"
+            default: "07:00",
+          },
+        },
+        // Frequency controls
+        frequency: {
+          instant: {
+            type: Boolean,
+            default: true,
+          },
+          batched: {
+            type: Boolean,
+            default: false,
+          },
+          daily: {
+            type: Boolean,
+            default: false,
+          },
+        },
       },
       privacy: {
         showAge: {
@@ -225,6 +255,10 @@ const UserSchema = new mongoose.Schema(
           default: true,
         },
         onlineStatus: {
+          type: Boolean,
+          default: true,
+        },
+        readReceipts: {
           type: Boolean,
           default: true,
         },
@@ -415,6 +449,64 @@ const UserSchema = new mongoose.Schema(
         vibration: { type: Boolean, default: true },
       },
     },
+    // Device tokens for push notifications
+    deviceTokens: [
+      {
+        token: {
+          type: String,
+          required: true,
+        },
+        platform: {
+          type: String,
+          enum: ["web", "android", "ios"],
+          required: true,
+        },
+        deviceInfo: {
+          userAgent: String,
+          browser: String,
+          os: String,
+          deviceModel: String,
+          appVersion: String,
+        },
+        registeredAt: {
+          type: Date,
+          default: Date.now,
+        },
+        lastUsed: {
+          type: Date,
+          default: Date.now,
+        },
+        isActive: {
+          type: Boolean,
+          default: true,
+        },
+        _id: {
+          type: mongoose.Schema.Types.ObjectId,
+          default: () => new mongoose.Types.ObjectId(),
+        },
+      },
+    ],
+    // Add notification statistics tracking
+    notificationStats: {
+      sent: {
+        type: Number,
+        default: 0,
+      },
+      delivered: {
+        type: Number,
+        default: 0,
+      },
+      clicked: {
+        type: Number,
+        default: 0,
+      },
+      lastNotificationSent: {
+        type: Date,
+      },
+      lastNotificationClicked: {
+        type: Date,
+      },
+    },
   },
   {
     timestamps: true,
@@ -432,6 +524,11 @@ UserSchema.index({ createdAt: -1 });
 UserSchema.index({ "verification.isVerified": 1 });
 UserSchema.index({ "subscription.type": 1 });
 UserSchema.index({ email: 1, isActive: 1 });
+
+// Device token indexes
+UserSchema.index({ "deviceTokens.token": 1 });
+UserSchema.index({ "deviceTokens.platform": 1 });
+UserSchema.index({ "deviceTokens.lastUsed": 1 });
 
 // Compound indexes for discovery
 UserSchema.index({
@@ -508,6 +605,21 @@ UserSchema.pre("save", function (next) {
   if (this.passwordResetExpires && this.passwordResetExpires < new Date()) {
     this.passwordResetToken = undefined;
     this.passwordResetExpires = undefined;
+  }
+
+  // Remove duplicate device tokens
+  if (this.deviceTokens && this.deviceTokens.length > 0) {
+    const uniqueTokens = [];
+    const seenTokens = new Set();
+
+    this.deviceTokens.forEach((device) => {
+      if (!seenTokens.has(device.token)) {
+        seenTokens.add(device.token);
+        uniqueTokens.push(device);
+      }
+    });
+
+    this.deviceTokens = uniqueTokens;
   }
 
   next();
@@ -886,5 +998,197 @@ UserSchema.statics.findSuspiciousUsers = function () {
     ],
   }).select("firstName lastName email createdAt stats safety");
 };
+
+// Device token methods
+UserSchema.methods.addDeviceToken = function (tokenData) {
+  const existingIndex = this.deviceTokens.findIndex(
+    (device) => device.token === tokenData.token
+  );
+
+  const deviceInfo = {
+    token: tokenData.token,
+    platform: tokenData.platform,
+    deviceInfo: tokenData.deviceInfo || {},
+    registeredAt:
+      existingIndex >= 0
+        ? this.deviceTokens[existingIndex].registeredAt
+        : new Date(),
+    lastUsed: new Date(),
+    isActive: true,
+  };
+
+  if (existingIndex >= 0) {
+    this.deviceTokens[existingIndex] = deviceInfo;
+  } else {
+    this.deviceTokens.push(deviceInfo);
+  }
+
+  // Limit to 10 devices per user
+  if (this.deviceTokens.length > 10) {
+    this.deviceTokens = this.deviceTokens
+      .sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed))
+      .slice(0, 10);
+  }
+
+  return this.save();
+};
+
+// Method to remove device token
+UserSchema.methods.removeDeviceToken = function (token) {
+  this.deviceTokens = this.deviceTokens.filter(
+    (device) => device.token !== token
+  );
+  return this.save();
+};
+
+// Method to get active device tokens
+UserSchema.methods.getActiveDeviceTokens = function () {
+  return this.deviceTokens.filter((device) => device.isActive);
+};
+
+// Method to clean up old device tokens
+UserSchema.methods.cleanupDeviceTokens = function (daysOld = 30) {
+  const cutoffDate = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
+  const originalLength = this.deviceTokens.length;
+
+  this.deviceTokens = this.deviceTokens.filter(
+    (device) => new Date(device.lastUsed) > cutoffDate
+  );
+
+  if (this.deviceTokens.length !== originalLength) {
+    console.log(
+      `🧹 Cleaned up ${
+        originalLength - this.deviceTokens.length
+      } old device tokens for user ${this._id}`
+    );
+    return this.save();
+  }
+
+  return Promise.resolve(this);
+};
+
+// Method to check if notifications are enabled for a type
+UserSchema.methods.canReceiveNotification = function (type) {
+  if (!this.settings?.notifications) {
+    return true; // Default to enabled
+  }
+
+  const settings = this.settings.notifications;
+
+  // Check if push notifications are globally disabled
+  if (!settings.push) {
+    return false;
+  }
+
+  // Check specific notification type
+  switch (type) {
+    case "match":
+      return settings.matches !== false;
+    case "message":
+      return settings.messages !== false;
+    case "like":
+    case "superlike":
+      return settings.likes !== false;
+    default:
+      return true;
+  }
+};
+
+// Method to check quiet hours
+UserSchema.methods.isInQuietHours = function () {
+  if (!this.settings?.notifications?.quietHours?.enabled) {
+    return false;
+  }
+
+  const now = new Date();
+  const currentTime =
+    now.getHours().toString().padStart(2, "0") +
+    ":" +
+    now.getMinutes().toString().padStart(2, "0");
+
+  const { start, end } = this.settings.notifications.quietHours;
+
+  if (start <= end) {
+    // Same day range (e.g., 09:00 to 17:00)
+    return currentTime >= start && currentTime <= end;
+  } else {
+    // Overnight range (e.g., 22:00 to 07:00)
+    return currentTime >= start || currentTime <= end;
+  }
+};
+
+// Method to increment notification stats
+UserSchema.methods.incrementNotificationStat = function (type) {
+  if (!this.notificationStats) {
+    this.notificationStats = { sent: 0, delivered: 0, clicked: 0 };
+  }
+
+  switch (type) {
+    case "sent":
+      this.notificationStats.sent++;
+      this.notificationStats.lastNotificationSent = new Date();
+      break;
+    case "delivered":
+      this.notificationStats.delivered++;
+      break;
+    case "clicked":
+      this.notificationStats.clicked++;
+      this.notificationStats.lastNotificationClicked = new Date();
+      break;
+  }
+
+  return this.save();
+};
+
+// Static method to find users with device tokens
+UserSchema.statics.findUsersWithDeviceTokens = function (platform = null) {
+  const query = {
+    isActive: true,
+    deviceTokens: { $exists: true, $not: { $size: 0 } },
+  };
+
+  if (platform) {
+    query["deviceTokens.platform"] = platform;
+  }
+
+  return this.find(query).select("_id firstName deviceTokens settings");
+};
+
+// Static method to cleanup all old device tokens
+UserSchema.statics.cleanupAllDeviceTokens = async function (daysOld = 30) {
+  const cutoffDate = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
+
+  const result = await this.updateMany(
+    {
+      "deviceTokens.lastUsed": { $lt: cutoffDate },
+    },
+    {
+      $pull: {
+        deviceTokens: { lastUsed: { $lt: cutoffDate } },
+      },
+    }
+  );
+
+  console.log(`🧹 Cleaned up device tokens from ${result.modifiedCount} users`);
+  return result;
+};
+
+// Virtual for notification preferences summary
+UserSchema.virtual("notificationSummary").get(function () {
+  const settings = this.settings?.notifications || {};
+  const enabledCount = Object.values(settings).filter(Boolean).length;
+  const totalSettings = Object.keys(settings).length;
+
+  return {
+    enabledCount,
+    totalSettings,
+    percentage:
+      totalSettings > 0
+        ? Math.round((enabledCount / totalSettings) * 100)
+        : 100,
+    allEnabled: enabledCount === totalSettings,
+    noneEnabled: enabledCount === 0,
+  };
+});
 
 module.exports = mongoose.model("User", UserSchema);
