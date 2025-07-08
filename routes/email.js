@@ -259,7 +259,7 @@ router.get("/templates", authenticate, (req, res) => {
       },
       {
         name: "new-match",
-        description: "New match notification",
+        description: "New match notification email",
         variables: [
           "firstName",
           "matchFirstName",
@@ -267,6 +267,8 @@ router.get("/templates", authenticate, (req, res) => {
           "matchBio",
           "matchPhoto",
           "chatUrl",
+          "appUrl",
+          "unsubscribeUrl",
         ],
       },
       {
@@ -688,6 +690,125 @@ router.get("/preview/:template", authenticate, (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error generating template preview",
+      error: error.message,
+    });
+  }
+});
+
+// @route   POST /api/email/send-match-email
+// @desc    Manually send new match email (for testing)
+// @access  Private
+router.post("/send-match-email", authenticate, async (req, res) => {
+  try {
+    const { matchedUserId } = req.body;
+
+    if (!matchedUserId) {
+      return res.status(400).json({
+        success: false,
+        message: "Matched user ID is required",
+      });
+    }
+
+    // Get the matched user
+    const matchedUser = await User.findById(matchedUserId).select(
+      "firstName lastName photos bio dateOfBirth"
+    );
+
+    if (!matchedUser) {
+      return res.status(404).json({
+        success: false,
+        message: "Matched user not found",
+      });
+    }
+
+    // Create a mock match for testing
+    const mockMatch = {
+      _id: "test-match-" + Date.now(),
+      users: [req.user._id, matchedUserId],
+      matchedAt: new Date(),
+    };
+
+    // Send the new match email
+    const result = await emailService.sendNewMatchEmail(
+      req.user,
+      mockMatch,
+      matchedUser
+    );
+
+    if (result.success) {
+      res.json({
+        success: true,
+        message: "New match email sent successfully",
+        messageId: result.messageId,
+        previewUrl: result.previewUrl,
+        recipient: {
+          name: req.user.firstName,
+          email: req.user.email,
+        },
+        match: {
+          name: matchedUser.firstName,
+          age: matchedUser.dateOfBirth
+            ? new Date().getFullYear() -
+              new Date(matchedUser.dateOfBirth).getFullYear()
+            : "Unknown",
+        },
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: "Failed to send new match email",
+        error: result.error,
+      });
+    }
+  } catch (error) {
+    console.error("Send match email error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error sending new match email",
+      error: error.message,
+    });
+  }
+});
+
+// @route   GET /api/email/preview/new-match
+// @desc    Preview new match email template
+// @access  Private
+router.get("/preview/new-match", authenticate, async (req, res) => {
+  try {
+    // Sample data for preview
+    const sampleData = {
+      firstName: req.user.firstName || "John",
+      matchFirstName: "Emma",
+      matchAge: 28,
+      matchBio:
+        "Adventure seeker, coffee lover, and dog mom! Looking for someone to explore the city with and share Sunday brunch adventures. Let's create some amazing memories together! 🌟☕🐕",
+      matchPhoto:
+        "https://images.unsplash.com/photo-1494790108755-2616b612b1ab?w=400",
+      chatUrl: `${process.env.FRONTEND_URL}/chat/sample-match-id`,
+      appUrl: process.env.FRONTEND_URL,
+      unsubscribeUrl: `${
+        process.env.FRONTEND_URL
+      }/unsubscribe?email=${encodeURIComponent(req.user.email)}`,
+    };
+
+    try {
+      const compiledTemplate = emailService.compileTemplate(
+        "new-match",
+        sampleData
+      );
+      res.send(compiledTemplate); // Return HTML for preview
+    } catch (templateError) {
+      res.status(404).json({
+        success: false,
+        message: "New match template not found",
+        error: templateError.message,
+      });
+    }
+  } catch (error) {
+    console.error("New match email preview error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error generating new match email preview",
       error: error.message,
     });
   }

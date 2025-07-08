@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Reset Your Password - Habibi</title>
+    <title>{{title}} - Habibi</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -11,7 +11,7 @@
         padding: 20px;
       }
       .header {
-        background: #ff69b4;
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
         color: white;
         padding: 30px;
         text-align: center;
@@ -38,7 +38,7 @@
         color: #666;
         border-radius: 0 0 10px 10px;
       }
-      .warning {
+      .highlight {
         background: #fff3cd;
         border: 1px solid #ffeaa7;
         padding: 15px;
@@ -49,42 +49,23 @@
   </head>
   <body>
     <div class="header">
-      <h1>🔐 Password Reset</h1>
+      <h1>{{title}}</h1>
     </div>
     <div class="content">
-      <h2>Hi {{firstName}},</h2>
-      <p>
-        We received a request to reset your password for your Habibi account.
-      </p>
+      <h2>Hi {{firstName}}!</h2>
 
-      <div class="warning">
-        <strong>⚠️ Security Notice:</strong> This link will expire in 1 hour for
-        your security.
+      <div class="highlight">
+        <p style="margin: 0; font-size: 16px; line-height: 1.6">{{message}}</p>
       </div>
 
-      <a href="{{resetUrl}}" class="button">Reset Your Password</a>
+      <a href="{{actionUrl}}" class="button">{{actionText}}</a>
 
-      <p>
-        If the button doesn't work, copy and paste this link into your browser:
+      <p style="color: #666; font-size: 14px; margin-top: 30px">
+        {{footerMessage}}
       </p>
-      <p style="word-break: break-all; color: #666">{{resetUrl}}</p>
-
-      <h3>🛡️ Didn't request this?</h3>
-      <p>
-        If you didn't request a password reset, please ignore this email. Your
-        password will remain unchanged.
-      </p>
-
-      <p><strong>Tips for a secure password:</strong></p>
-      <ul>
-        <li>Use at least 8 characters</li>
-        <li>Include uppercase and lowercase letters</li>
-        <li>Add numbers and special characters</li>
-        <li>Don't reuse passwords from other sites</li>
-      </ul>
     </div>
     <div class="footer">
-      <p>Stay safe! 🛡️<br />The Habibi Security Team</p>
+      <p>Thanks for using Habibi! 💕<br />The Habibi Team</p>
     </div>
   </body>
 </html>

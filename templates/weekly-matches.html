@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Your Weekly Matches - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .stats {
+        display: flex;
+        justify-content: space-around;
+        margin: 20px 0;
+        text-align: center;
+      }
+      .stat {
+        flex: 1;
+        padding: 15px;
+        background: #f8f9fa;
+        border-radius: 10px;
+        margin: 0 5px;
+      }
+      .stat-number {
+        font-size: 24px;
+        font-weight: bold;
+        color: #ff69b4;
+      }
+      .match-card {
+        border: 1px solid #ddd;
+        border-radius: 10px;
+        padding: 15px;
+        margin: 15px 0;
+        display: flex;
+        align-items: center;
+      }
+      .match-photo {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        margin-right: 15px;
+        background: #f0f0f0;
+      }
+      .match-info {
+        flex: 1;
+      }
+      .match-name {
+        font-weight: bold;
+        color: #ff69b4;
+      }
+      .match-bio {
+        color: #666;
+        font-size: 14px;
+        margin-top: 5px;
+      }
+      .button {
+        background: #ff69b4;
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>📊 Your Weekly Summary</h1>
+      <p>Here's what happened in your love life this week!</p>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}! 👋</h2>
+      <p>Here's your weekly Habibi activity summary:</p>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-number">{{newMatches}}</div>
+          <div>New Matches</div>
+        </div>
+        <div class="stat">
+          <div class="stat-number">{{profileViews}}</div>
+          <div>Profile Views</div>
+        </div>
+        <div class="stat">
+          <div class="stat-number">{{likes}}</div>
+          <div>Likes Received</div>
+        </div>
+      </div>
+
+      {{#if newMatchesList}}
+      <h3>💕 Your New Matches</h3>
+      {{#each newMatchesList}}
+      <div class="match-card">
+        <img
+          src="{{photo}}"
+          class="match-photo"
+          alt="{{firstName}}"
+          onerror="this.style.display='none'"
+        />
+        <div class="match-info">
+          <div class="match-name">{{firstName}}, {{age}}</div>
+          <div class="match-bio">{{bio}}</div>
+        </div>
+      </div>
+      {{/each}} {{/if}}
+
+      <a href="{{appUrl}}" class="button">View All Matches</a>
+
+      <h3>💡 Tips for Better Matches</h3>
+      <ul>
+        <li>Update your photos regularly</li>
+        <li>Keep your bio fresh and engaging</li>
+        <li>Be active and swipe daily</li>
+        <li>Start conversations with your matches</li>
+      </ul>
+    </div>
+    <div class="footer">
+      <p>Keep swiping and stay positive! 💕<br />The Habibi Team</p>
+      <p>
+        <small
+          ><a href="{{unsubscribeUrl}}" style="color: #666"
+            >Unsubscribe from weekly emails</a
+          ></small
+        >
+      </p>
+    </div>
+  </body>
+</html>

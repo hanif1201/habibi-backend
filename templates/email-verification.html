@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Verify Your Email - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .button {
+        background: #ff69b4;
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+      .info {
+        background: #e3f2fd;
+        border: 1px solid #bbdefb;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>✉️ Verify Your Email</h1>
+      <p>One step closer to finding love!</p>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}!</h2>
+      <p>
+        Thanks for joining Habibi! To complete your registration and start
+        finding meaningful connections, please verify your email address.
+      </p>
+
+      <div class="info">
+        <strong>💡 Why verify?</strong> Verified users get more matches and are
+        trusted by the community!
+      </div>
+
+      <a href="{{verificationUrl}}" class="button">Verify My Email</a>
+
+      <p>
+        If the button doesn't work, copy and paste this link into your browser:
+      </p>
+      <p style="word-break: break-all; color: #666">{{verificationUrl}}</p>
+
+      <h3>🎯 What happens next?</h3>
+      <ul>
+        <li>Complete your profile with photos and bio</li>
+        <li>Set your preferences and interests</li>
+        <li>Start discovering potential matches</li>
+        <li>Begin meaningful conversations</li>
+      </ul>
+
+      <p>
+        <strong>Need help?</strong> Reply to this email and our support team
+        will assist you.
+      </p>
+    </div>
+    <div class="footer">
+      <p>Welcome to the Habibi family! 💕<br />The Habibi Team</p>
+      <p><small>This verification link expires in 24 hours.</small></p>
+    </div>
+  </body>
+</html>

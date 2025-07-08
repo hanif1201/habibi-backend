@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>It's a Match! - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+        background-color: #f8f9fa;
+      }
+      .container {
+        background: white;
+        border-radius: 15px;
+        overflow: hidden;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+      }
+      .header {
+        background: linear-gradient(135deg, #ffd700, #ff69b4, #ff1493);
+        color: white;
+        padding: 40px 30px;
+        text-align: center;
+      }
+      .header h1 {
+        margin: 0 0 10px 0;
+        font-size: 32px;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+      }
+      .content {
+        background: white;
+        padding: 40px 30px;
+      }
+      .match-card {
+        border: 3px solid #ff69b4;
+        border-radius: 20px;
+        padding: 25px;
+        margin: 25px 0;
+        text-align: center;
+        background: linear-gradient(135deg, #fff5f8, #ffffff);
+        box-shadow: 0 4px 15px rgba(255, 105, 180, 0.2);
+      }
+      .match-photo {
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+        margin: 0 auto 20px;
+        background: #f0f0f0;
+        border: 4px solid #ff69b4;
+        box-shadow: 0 4px 15px rgba(255, 105, 180, 0.3);
+        object-fit: cover;
+      }
+      .match-name {
+        font-size: 24px;
+        font-weight: bold;
+        color: #ff1493;
+        margin: 0 0 10px 0;
+      }
+      .match-bio {
+        color: #666;
+        font-style: italic;
+        line-height: 1.5;
+        margin: 10px 0 20px 0;
+      }
+      .button {
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
+        color: white;
+        padding: 18px 35px;
+        text-decoration: none;
+        border-radius: 30px;
+        display: inline-block;
+        margin: 25px 0;
+        font-weight: bold;
+        font-size: 16px;
+        box-shadow: 0 4px 15px rgba(255, 105, 180, 0.4);
+      }
+      .urgency-notice {
+        background: linear-gradient(135deg, #fff3cd, #ffeaa7);
+        border: 2px solid #ffd700;
+        border-radius: 10px;
+        padding: 20px;
+        margin: 25px 0;
+        text-align: center;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 30px;
+        text-align: center;
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>🎉 It's a Match!</h1>
+        <p>Someone special likes you back! 💝</p>
+      </div>
+      <div class="content">
+        <h2>Hi {{firstName}}!</h2>
+        <p style="font-size: 18px">
+          Great news! You and <strong>{{matchFirstName}}</strong> liked each
+          other. This is the beginning of something beautiful! 💕
+        </p>
+
+        <div class="match-card">
+          <img
+            src="{{matchPhoto}}"
+            class="match-photo"
+            alt="{{matchFirstName}}"
+            onerror="this.style.display='none'"
+          />
+          <div class="match-name">{{matchFirstName}}, {{matchAge}}</div>
+          <div class="match-bio">{{matchBio}}</div>
+        </div>
+
+        <div style="text-align: center">
+          <a href="{{chatUrl}}" class="button">💬 Start Chatting</a>
+        </div>
+
+        <div class="urgency-notice">
+          <strong>⏰ Important:</strong> You have 72 hours to start a
+          conversation before this match expires. Don't wait - break the ice
+          now!
+        </div>
+
+        <h3>💬 Great Conversation Starters</h3>
+        <ul>
+          <li>"Hi {{matchFirstName}}! How's your day going?"</li>
+          <li>"I love your photos! Where was that photo taken?"</li>
+          <li>
+            "We seem to have something in common. Tell me more about [shared
+            interest]"
+          </li>
+          <li>
+            "{{matchFirstName}}, your bio made me smile! Tell me more about
+            [specific detail]"
+          </li>
+        </ul>
+      </div>
+      <div class="footer">
+        <p style="font-size: 18px; color: #ff69b4; font-weight: bold">
+          Happy chatting! 💕
+        </p>
+        <p>The Habibi Team</p>
+        <p>
+          <small
+            ><a href="{{unsubscribeUrl}}" style="color: #666"
+              >Unsubscribe from match emails</a
+            ></small
+          >
+        </p>
+      </div>
+    </div>
+  </body>
+</html>

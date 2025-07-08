@@ -1,4 +1,4 @@
-// services/emailService.js - Complete Email Service Implementation
+// services/emailService.js - Updated with New Match Email Method
 const nodemailer = require("nodemailer");
 const fs = require("fs").promises;
 const path = require("path");
@@ -60,7 +60,7 @@ class EmailService {
       throw new Error("SENDGRID_API_KEY is required for SendGrid");
     }
 
-    this.transporter = nodemailer.createTransport({
+    this.transporter = nodemailer.createTransporter({
       service: "SendGrid",
       auth: {
         user: "apikey",
@@ -78,7 +78,7 @@ class EmailService {
       );
     }
 
-    this.transporter = nodemailer.createTransport({
+    this.transporter = nodemailer.createTransporter({
       service: "gmail",
       auth: {
         user: process.env.GMAIL_USER,
@@ -94,7 +94,7 @@ class EmailService {
       throw new Error("SMTP_HOST and SMTP_PORT are required for SMTP");
     }
 
-    this.transporter = nodemailer.createTransport({
+    this.transporter = nodemailer.createTransporter({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT),
       secure: process.env.SMTP_SECURE === "true",
@@ -111,7 +111,7 @@ class EmailService {
     // Use Ethereal Email for development/testing
     const testAccount = await nodemailer.createTestAccount();
 
-    this.transporter = nodemailer.createTransport({
+    this.transporter = nodemailer.createTransporter({
       host: "smtp.ethereal.email",
       port: 587,
       secure: false,
@@ -152,7 +152,7 @@ class EmailService {
       "password-reset.html",
       "email-verification.html",
       "weekly-matches.html",
-      "new-match.html",
+      "new-match.html", // Added new match template
       "reminder.html",
     ];
 
@@ -394,45 +394,58 @@ class EmailService {
         <html>
         <head>
           <meta charset="utf-8">
-          <title>New Match! - Habibi</title>
+          <title>It's a Match! - Habibi</title>
           <style>
-            body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #FFD700, #FF69B4); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-            .content { background: white; padding: 30px; border: 1px solid #ddd; }
-            .match-card { border: 2px solid #FF69B4; border-radius: 15px; padding: 20px; margin: 20px 0; text-align: center; background: linear-gradient(135deg, #fff5f8, #ffffff); }
-            .match-photo { width: 100px; height: 100px; border-radius: 50%; margin: 0 auto 15px; background: #f0f0f0; }
-            .button { background: #FF69B4; color: white; padding: 15px 30px; text-decoration: none; border-radius: 25px; display: inline-block; margin: 20px 0; }
-            .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #666; border-radius: 0 0 10px 10px; }
+            body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }
+            .container { background: white; border-radius: 15px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.1); }
+            .header { background: linear-gradient(135deg, #FFD700, #FF69B4, #FF1493); color: white; padding: 40px 30px; text-align: center; }
+            .header h1 { margin: 0 0 10px 0; font-size: 32px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+            .content { background: white; padding: 40px 30px; }
+            .match-card { border: 3px solid #FF69B4; border-radius: 20px; padding: 25px; margin: 25px 0; text-align: center; background: linear-gradient(135deg, #fff5f8, #ffffff); box-shadow: 0 4px 15px rgba(255, 105, 180, 0.2); }
+            .match-photo { width: 120px; height: 120px; border-radius: 50%; margin: 0 auto 20px; background: #f0f0f0; border: 4px solid #FF69B4; box-shadow: 0 4px 15px rgba(255, 105, 180, 0.3); object-fit: cover; }
+            .match-name { font-size: 24px; font-weight: bold; color: #FF1493; margin: 0 0 10px 0; }
+            .match-bio { color: #666; font-style: italic; line-height: 1.5; margin: 10px 0 20px 0; }
+            .button { background: linear-gradient(135deg, #FF69B4, #FF1493); color: white; padding: 18px 35px; text-decoration: none; border-radius: 30px; display: inline-block; margin: 25px 0; font-weight: bold; font-size: 16px; box-shadow: 0 4px 15px rgba(255, 105, 180, 0.4); }
+            .urgency-notice { background: linear-gradient(135deg, #FFF3CD, #FFEAA7); border: 2px solid #FFD700; border-radius: 10px; padding: 20px; margin: 25px 0; text-align: center; }
+            .footer { background: #f8f9fa; padding: 30px; text-align: center; color: #666; }
           </style>
         </head>
         <body>
-          <div class="header">
-            <h1>🎉 It's a Match!</h1>
-            <p>Someone special likes you back!</p>
-          </div>
-          <div class="content">
-            <h2>Hi {{firstName}}!</h2>
-            <p>Great news! You and <strong>{{matchFirstName}}</strong> liked each other. This is the start of something beautiful! 💕</p>
-            
-            <div class="match-card">
-              <img src="{{matchPhoto}}" class="match-photo" alt="{{matchFirstName}}">
-              <h3>{{matchFirstName}}, {{matchAge}}</h3>
-              <p style="color: #666;">{{matchBio}}</p>
+          <div class="container">
+            <div class="header">
+              <h1>🎉 It's a Match!</h1>
+              <p>Someone special likes you back! 💝</p>
             </div>
-            
-            <a href="{{chatUrl}}" class="button">Start Chatting</a>
-            
-            <h3>💬 Conversation Starters</h3>
-            <ul>
-              <li>"Hi {{matchFirstName}}! How's your day going?"</li>
-              <li>"I noticed we both like [shared interest]. What got you into that?"</li>
-              <li>"Your photos are great! Where was that [location] photo taken?"</li>
-            </ul>
-            
-            <p><strong>Remember:</strong> You have 72 hours to start a conversation before this match expires. Don't wait - say hello!</p>
-          </div>
-          <div class="footer">
-            <p>Happy chatting! 💬<br>The Habibi Team</p>
+            <div class="content">
+              <h2>Hi {{firstName}}!</h2>
+              <p style="font-size: 18px;">Great news! You and <strong>{{matchFirstName}}</strong> liked each other. This is the beginning of something beautiful! 💕</p>
+              
+              <div class="match-card">
+                <img src="{{matchPhoto}}" class="match-photo" alt="{{matchFirstName}}" onerror="this.style.display='none'">
+                <div class="match-name">{{matchFirstName}}, {{matchAge}}</div>
+                <div class="match-bio">{{matchBio}}</div>
+              </div>
+              
+              <div style="text-align: center;">
+                <a href="{{chatUrl}}" class="button">💬 Start Chatting</a>
+              </div>
+              
+              <div class="urgency-notice">
+                <strong>⏰ Important:</strong> You have 72 hours to start a conversation before this match expires. Don't wait - break the ice now!
+              </div>
+              
+              <h3>💬 Great Conversation Starters</h3>
+              <ul>
+                <li>"Hi {{matchFirstName}}! How's your day going?"</li>
+                <li>"I love your photos! Where was that photo taken?"</li>
+                <li>"We seem to have something in common. Tell me more about [shared interest]"</li>
+                <li>"{{matchFirstName}}, your bio made me smile! Tell me more about [specific detail]"</li>
+              </ul>
+            </div>
+            <div class="footer">
+              <p style="font-size: 18px; color: #FF69B4; font-weight: bold;">Happy chatting! 💕</p>
+              <p>The Habibi Team</p>
+            </div>
           </div>
         </body>
         </html>
@@ -587,22 +600,71 @@ class EmailService {
     );
   }
 
+  // *** NEW: Send New Match Email Method ***
   async sendNewMatchEmail(user, match, otherUser) {
-    const chatUrl = `${process.env.FRONTEND_URL}/chat/${match._id}`;
+    try {
+      // Calculate other user's age
+      const calculateAge = (dateOfBirth) => {
+        if (!dateOfBirth) return "Unknown";
+        const today = new Date();
+        const birthDate = new Date(dateOfBirth);
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
 
-    return await this.sendEmail(
-      user.email,
-      "🎉 You have a new match!",
-      "new-match",
-      {
+        if (
+          monthDiff < 0 ||
+          (monthDiff === 0 && today.getDate() < birthDate.getDate())
+        ) {
+          age--;
+        }
+        return age;
+      };
+
+      const chatUrl = `${process.env.FRONTEND_URL}/chat/${match._id}`;
+      const appUrl = process.env.FRONTEND_URL;
+      const unsubscribeUrl = `${
+        process.env.FRONTEND_URL
+      }/unsubscribe?email=${encodeURIComponent(user.email)}`;
+
+      const templateData = {
         firstName: user.firstName,
         matchFirstName: otherUser.firstName,
-        matchAge: otherUser.age || "Unknown",
-        matchBio: otherUser.bio || "No bio available",
-        matchPhoto: otherUser.photos?.[0]?.url || "",
+        matchAge: calculateAge(otherUser.dateOfBirth),
+        matchBio:
+          otherUser.bio && otherUser.bio.length > 10
+            ? otherUser.bio.substring(0, 150) +
+              (otherUser.bio.length > 150 ? "..." : "")
+            : "No bio available yet - ask them about themselves!",
+        matchPhoto:
+          otherUser.photos?.find((p) => p.isPrimary)?.url ||
+          otherUser.photos?.[0]?.url ||
+          "/default-avatar.png",
         chatUrl,
+        appUrl,
+        unsubscribeUrl,
+      };
+
+      const result = await this.sendEmail(
+        user.email,
+        `🎉 It's a Match with ${otherUser.firstName}!`,
+        "new-match",
+        templateData
+      );
+
+      if (result.success) {
+        console.log(
+          `💕 New match email sent to ${user.firstName} (${user.email}) about match with ${otherUser.firstName}`
+        );
       }
-    );
+
+      return result;
+    } catch (error) {
+      console.error("❌ Error sending new match email:", error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
   }
 
   async sendWeeklyMatchSummary(user, weeklyStats) {

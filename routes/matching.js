@@ -325,8 +325,10 @@ function isUserRecentlyActive(lastActive) {
   return new Date(lastActive) > fifteenMinutesAgo;
 }
 
+// Updated swipe route section from routes/matching.js
+
 // @route   POST /api/matching/swipe
-// @desc    Enhanced swipe with analytics and premium features
+// @desc    Enhanced swipe with analytics, premium features, and match emails
 // @access  Private
 router.post(
   "/swipe",
@@ -440,7 +442,7 @@ router.post(
           await match.save();
           await match.populate(
             "users",
-            "firstName lastName photos bio dateOfBirth gender verification"
+            "firstName lastName photos bio dateOfBirth gender verification email settings"
           );
 
           // Update match stats for both users
@@ -451,7 +453,144 @@ router.post(
 
           isMatch = true;
 
-          // Send match notifications to both users
+          console.log(
+            `💕 New match created: ${currentUser.firstName} + ${swipedUser.firstName}`
+          );
+
+          // *** NEW: Send Match Emails ***
+          try {
+            const emailService = require("../services/emailService");
+
+            // Get full user data for email templates
+            const [swiperUser, swipedUserFull] = await Promise.all([
+              User.findById(swiperId).select(
+                "firstName lastName email settings"
+              ),
+              User.findById(swipedUserId).select(
+                "firstName lastName email settings"
+              ),
+            ]);
+
+            // Send match emails to both users (if they have email notifications enabled)
+            const emailPromises = [];
+
+            // Email to swiper (current user)
+            if (
+              swiperUser.settings?.notifications?.email !== false &&
+              swiperUser.settings?.notifications?.matches !== false
+            ) {
+              console.log(
+                `📧 Sending match email to ${swiperUser.firstName} (${swiperUser.email})`
+              );
+              emailPromises.push(
+                emailService
+                  .sendNewMatchEmail(swiperUser, match, swipedUser)
+                  .then((result) => {
+                    if (result.success) {
+                      console.log(
+                        `✅ Match email sent to ${swiperUser.firstName}`
+                      );
+                    } else {
+                      console.log(
+                        `❌ Failed to send match email to ${swiperUser.firstName}: ${result.error}`
+                      );
+                    }
+                    return {
+                      user: swiperUser.firstName,
+                      success: result.success,
+                      error: result.error,
+                    };
+                  })
+                  .catch((error) => {
+                    console.error(
+                      `❌ Match email error for ${swiperUser.firstName}:`,
+                      error
+                    );
+                    return {
+                      user: swiperUser.firstName,
+                      success: false,
+                      error: error.message,
+                    };
+                  })
+              );
+            } else {
+              console.log(
+                `📧 Skipping match email to ${swiperUser.firstName} (notifications disabled)`
+              );
+            }
+
+            // Email to swiped user
+            if (
+              swipedUserFull.settings?.notifications?.email !== false &&
+              swipedUserFull.settings?.notifications?.matches !== false
+            ) {
+              console.log(
+                `📧 Sending match email to ${swipedUserFull.firstName} (${swipedUserFull.email})`
+              );
+              emailPromises.push(
+                emailService
+                  .sendNewMatchEmail(swipedUserFull, match, currentUser)
+                  .then((result) => {
+                    if (result.success) {
+                      console.log(
+                        `✅ Match email sent to ${swipedUserFull.firstName}`
+                      );
+                    } else {
+                      console.log(
+                        `❌ Failed to send match email to ${swipedUserFull.firstName}: ${result.error}`
+                      );
+                    }
+                    return {
+                      user: swipedUserFull.firstName,
+                      success: result.success,
+                      error: result.error,
+                    };
+                  })
+                  .catch((error) => {
+                    console.error(
+                      `❌ Match email error for ${swipedUserFull.firstName}:`,
+                      error
+                    );
+                    return {
+                      user: swipedUserFull.firstName,
+                      success: false,
+                      error: error.message,
+                    };
+                  })
+              );
+            } else {
+              console.log(
+                `📧 Skipping match email to ${swipedUserFull.firstName} (notifications disabled)`
+              );
+            }
+
+            // Send emails in parallel (don't block the response)
+            if (emailPromises.length > 0) {
+              Promise.all(emailPromises)
+                .then((results) => {
+                  const successful = results.filter((r) => r.success).length;
+                  const failed = results.filter((r) => !r.success).length;
+                  console.log(
+                    `📊 Match email results: ${successful} sent, ${failed} failed`
+                  );
+
+                  if (failed > 0) {
+                    console.log(
+                      "❌ Failed emails:",
+                      results.filter((r) => !r.success)
+                    );
+                  }
+                })
+                .catch((error) => {
+                  console.error("❌ Error in match email batch:", error);
+                });
+            }
+          } catch (emailError) {
+            // Log email error but don't fail the match creation
+            console.error("❌ Error setting up match emails:", emailError);
+          }
+
+          // Send push notifications to both users
           await Promise.all([
             pushNotificationService.sendMatchNotification(swiperId, {
               matchId: match._id.toString(),
