@@ -9,10 +9,20 @@ const userSockets = new Map(); // userId -> Set of socketIds (for multiple tabs/
 const typingUsers = new Map(); // matchId -> { userId, userName, timestamp, timeout }
 const userRooms = new Map(); // userId -> Set of room names
 
+// Connection rate limiting
+const connectionAttempts = new Map(); // userId -> { count, firstAttempt, lastAttempt }
+const MAX_CONNECTIONS_PER_MINUTE = 5; // Reduced from 10
+const CONNECTION_WINDOW_MS = 60 * 1000; // 1 minute
+const MAX_CONCURRENT_CONNECTIONS = 2; // Reduced from 5
+
+// Block cycling users
+const blockedUsers = new Map(); // userId -> { blockedUntil, reason }
+const BLOCK_DURATION = 5 * 60 * 1000; // 5 minutes
+
 const socketHandler = (io) => {
   console.log("🔌 Enhanced Socket.io handler initialized");
 
-  // Enhanced authentication middleware
+  // Enhanced authentication middleware with rate limiting
   io.use(async (socket, next) => {
     try {
       const token = socket.handshake.auth.token;
@@ -28,13 +38,87 @@ const socketHandler = (io) => {
         process.env.JWT_SECRET || "your-secret-key"
       );
 
+      const userId = decoded.userId;
+
+      // Check if user is blocked
+      const blockedUser = blockedUsers.get(userId);
+      if (blockedUser && Date.now() < blockedUser.blockedUntil) {
+        console.log(
+          `🚫 User ${userId} is blocked until ${new Date(
+            blockedUser.blockedUntil
+          )}: ${blockedUser.reason}`
+        );
+        return next(
+          new Error(
+            "Connection temporarily blocked due to excessive reconnection attempts. Please wait 5 minutes."
+          )
+        );
+      }
+
+      // Rate limiting for connections
+      const now = Date.now();
+      const userAttempts = connectionAttempts.get(userId) || {
+        count: 0,
+        firstAttempt: now,
+        lastAttempt: now,
+      };
+
+      // Reset counter if window has passed
+      if (now - userAttempts.firstAttempt > CONNECTION_WINDOW_MS) {
+        userAttempts.count = 0;
+        userAttempts.firstAttempt = now;
+      }
+
+      userAttempts.count++;
+      userAttempts.lastAttempt = now;
+      connectionAttempts.set(userId, userAttempts);
+
+      if (userAttempts.count > MAX_CONNECTIONS_PER_MINUTE) {
+        console.log(
+          `🚫 Rate limit exceeded for user ${userId}: ${userAttempts.count} connections in 1 minute`
+        );
+
+        // Block user for 5 minutes if they keep cycling
+        if (userAttempts.count > MAX_CONNECTIONS_PER_MINUTE * 2) {
+          blockedUsers.set(userId, {
+            blockedUntil: Date.now() + BLOCK_DURATION,
+            reason: `Excessive reconnection attempts: ${userAttempts.count} in 1 minute`,
+          });
+          console.log(
+            `🚫 User ${userId} blocked for 5 minutes due to excessive reconnection attempts`
+          );
+        }
+
+        return next(
+          new Error(
+            "Too many connection attempts. Please wait before trying again."
+          )
+        );
+      }
+
+      // Check if user already has too many active connections
+      const existingSockets = userSockets.get(userId);
+      if (
+        existingSockets &&
+        existingSockets.size >= MAX_CONCURRENT_CONNECTIONS
+      ) {
+        console.log(
+          `⚠️ User ${userId} has ${existingSockets.size} active connections, limiting new ones`
+        );
+        return next(
+          new Error(
+            "Too many active connections. Please close other tabs or devices."
+          )
+        );
+      }
+
       // Get user from database with safety data
-      const user = await User.findById(decoded.userId).select("+safety");
+      const user = await User.findById(userId).select("+safety");
 
       if (!user || !user.isActive) {
         console.log(
           "❌ Socket auth failed: User not found or inactive:",
-          decoded.userId
+          userId
         );
         return next(new Error("User not found or inactive"));
       }
@@ -564,6 +648,37 @@ const socketHandler = (io) => {
         });
       }
     });
+
+    // Handle server stats request
+    socket.on("get_server_stats", () => {
+      const totalSockets = Array.from(userSockets.values()).reduce(
+        (sum, sockets) => sum + sockets.size,
+        0
+      );
+      const totalUsers = onlineUsers.size;
+      const totalTyping = typingUsers.size;
+
+      const usersWithMultipleConnections = [];
+      for (const [userId, sockets] of userSockets.entries()) {
+        if (sockets.size > 1) {
+          const user = onlineUsers.get(userId);
+          usersWithMultipleConnections.push({
+            userId,
+            firstName: user?.user?.firstName || "Unknown",
+            connectionCount: sockets.size,
+          });
+        }
+      }
+
+      socket.emit("server_stats", {
+        onlineUsers: totalUsers,
+        activeSockets: totalSockets,
+        typingUsers: totalTyping,
+        memoryUsage: process.memoryUsage(),
+        usersWithMultipleConnections,
+        timestamp: new Date(),
+      });
+    });
   });
 
   // ===== UTILITY FUNCTIONS =====
@@ -703,52 +818,63 @@ const socketHandler = (io) => {
         io.to(socketId).emit(event, data);
         sent++;
       }
-      return sent > 0;
+      return sent;
     }
-    return false;
+    return 0;
   };
 
-  io.sendToMatch = (matchId, event, data) => {
-    io.to(`match_${matchId}`).emit(event, data);
-  };
-
-  io.broadcastToAllUsers = (event, data) => {
-    io.emit(event, data);
-  };
-
-  // Enhanced periodic cleanup with better monitoring
+  // Clean up old connection attempts and blocked users periodically
   setInterval(() => {
     const now = Date.now();
-    const fiveMinutesAgo = now - 5 * 60 * 1000;
+    let cleaned = 0;
+    let unblocked = 0;
 
-    // Clean up old typing indicators
-    for (const [matchId, typingData] of typingUsers.entries()) {
-      if (now - typingData.startedAt.getTime() > 10000) {
-        clearTimeout(typingData.timeout);
-        typingUsers.delete(matchId);
+    for (const [userId, attempts] of connectionAttempts.entries()) {
+      if (now - attempts.lastAttempt > CONNECTION_WINDOW_MS * 2) {
+        connectionAttempts.delete(userId);
+        cleaned++;
       }
     }
 
-    // Clean up stale online users
-    for (const [userId, userData] of onlineUsers.entries()) {
-      if (userData.lastSeen.getTime() < fiveMinutesAgo) {
-        console.log(`🧹 Cleaning up stale user data for ${userId}`);
-        onlineUsers.delete(userId);
-        userRooms.delete(userId);
-        userSockets.delete(userId);
+    for (const [userId, blocked] of blockedUsers.entries()) {
+      if (now > blocked.blockedUntil) {
+        blockedUsers.delete(userId);
+        unblocked++;
       }
     }
 
-    // Log statistics
-    console.log(
-      `📊 Socket Stats - Online Users: ${
-        onlineUsers.size
-      }, Active Sockets: ${Array.from(userSockets.values()).reduce(
-        (sum, set) => sum + set.size,
-        0
-      )}, Typing: ${typingUsers.size}`
+    if (cleaned > 0 || unblocked > 0) {
+      console.log(
+        `🧹 Cleaned up ${cleaned} old connection attempts and unblocked ${unblocked} users`
+      );
+    }
+  }, CONNECTION_WINDOW_MS * 2);
+
+  // Log connection stats periodically
+  setInterval(() => {
+    const totalSockets = Array.from(userSockets.values()).reduce(
+      (sum, sockets) => sum + sockets.size,
+      0
     );
-  }, 60000); // Run every minute
+    const totalUsers = onlineUsers.size;
+    const totalTyping = typingUsers.size;
+
+    console.log(
+      `📊 Socket Stats - Online Users: ${totalUsers}, Active Sockets: ${totalSockets}, Typing: ${totalTyping}`
+    );
+
+    // Log users with multiple connections
+    for (const [userId, sockets] of userSockets.entries()) {
+      if (sockets.size > 3) {
+        const user = onlineUsers.get(userId);
+        console.log(
+          `⚠️ User ${user?.user?.firstName || userId} has ${
+            sockets.size
+          } active connections`
+        );
+      }
+    }
+  }, 30000); // Every 30 seconds
 
   console.log("✅ Enhanced Socket.io handler setup complete");
 };

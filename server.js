@@ -293,6 +293,23 @@ const io = new Server(server, {
     credentials: true,
   },
   transports: ["polling", "websocket"],
+  // Add connection limits and timeouts
+  maxHttpBufferSize: 1e6, // 1MB
+  pingTimeout: 60000, // 60 seconds
+  pingInterval: 25000, // 25 seconds
+  upgradeTimeout: 10000, // 10 seconds
+  allowUpgrades: true,
+  // Rate limiting
+  connectTimeout: 45000, // 45 seconds
+  // Prevent connection storms
+  allowEIO3: false, // Disable Engine.IO v3 compatibility
+  // Better error handling
+  cors: {
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    methods: ["GET", "POST"],
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
+  },
 });
 
 // Initialize socket handler

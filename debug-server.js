@@ -1,68 +1,83 @@
-// Simple test to check if server is working
+// Debug script to monitor and clean up socket connections
 // Run with: node debug-server.js
 
-const express = require("express");
-const { createServer } = require("http");
-const { Server } = require("socket.io");
+const { io } = require("socket.io-client");
 
-const app = express();
-const server = createServer(app);
+console.log("🔍 Socket Connection Debug Tool");
+console.log("================================");
 
-// Test Socket.io setup
-const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
+// Connect to your server
+const socket = io("http://localhost:5000", {
+  transports: ["polling", "websocket"],
+  timeout: 5000,
+  auth: {
+    token: "your-jwt-token-here", // Replace with actual token for testing
   },
 });
 
-app.use(express.json());
+socket.on("connect", () => {
+  console.log("✅ Connected to server");
+  console.log("   Socket ID:", socket.id);
+  console.log("   Transport:", socket.io.engine.transport.name);
 
-// Test routes
-app.get("/", (req, res) => {
-  res.json({
-    message: "Test server is running!",
-    socketio: "enabled",
-    timestamp: new Date().toISOString(),
-  });
+  // Request server stats
+  socket.emit("get_server_stats");
 });
 
-app.get("/api/test", (req, res) => {
-  res.json({
-    message: "API routes working!",
-    timestamp: new Date().toISOString(),
-  });
+socket.on("server_stats", (stats) => {
+  console.log("\n📊 Server Statistics:");
+  console.log("   Online Users:", stats.onlineUsers);
+  console.log("   Active Sockets:", stats.activeSockets);
+  console.log("   Typing Users:", stats.typingUsers);
+  console.log("   Memory Usage:", stats.memoryUsage);
+
+  if (stats.usersWithMultipleConnections) {
+    console.log("\n⚠️ Users with multiple connections:");
+    stats.usersWithMultipleConnections.forEach((user) => {
+      console.log(
+        `   - ${user.firstName}: ${user.connectionCount} connections`
+      );
+    });
+  }
 });
 
-// Test chat route
-app.get("/api/chat/test", (req, res) => {
-  res.json({
-    message: "Chat routes working!",
-    timestamp: new Date().toISOString(),
-  });
+socket.on("connect_error", (error) => {
+  console.error("❌ Connection failed:", error.message);
+
+  if (error.message.includes("Too many connection attempts")) {
+    console.log(
+      "\n🚫 Rate limit hit - server is protecting against connection storms"
+    );
+    console.log("   This is expected behavior to prevent server overload");
+  }
 });
 
-// Socket.io test
-io.on("connection", (socket) => {
-  console.log("✅ Socket.io client connected:", socket.id);
-
-  socket.emit("welcome", { message: "Socket.io is working!" });
-
-  socket.on("disconnect", () => {
-    console.log("👋 Socket.io client disconnected:", socket.id);
-  });
+socket.on("disconnect", (reason) => {
+  console.log("👋 Disconnected:", reason);
 });
 
-const PORT = 5000;
+// Cleanup function
+const cleanup = () => {
+  console.log("\n🧹 Cleaning up...");
+  socket.disconnect();
+  process.exit(0);
+};
 
-server.listen(PORT, () => {
-  console.log("🧪 TEST SERVER RUNNING:");
-  console.log(`   📡 HTTP: http://localhost:${PORT}`);
-  console.log(`   💬 Socket.io: ws://localhost:${PORT}`);
-  console.log("   🧪 Test URLs:");
-  console.log("      - http://localhost:5000/");
-  console.log("      - http://localhost:5000/api/test");
-  console.log("      - http://localhost:5000/api/chat/test");
-  console.log("");
-  console.log("If this works, your basic setup is correct!");
-});
+// Handle Ctrl+C
+process.on("SIGINT", cleanup);
+process.on("SIGTERM", cleanup);
+
+// Auto-disconnect after 10 seconds
+setTimeout(() => {
+  console.log("\n⏰ Debug session completed");
+  cleanup();
+}, 10000);
+
+console.log("\n💡 Tips to prevent connection storms:");
+console.log(
+  "1. Ensure your frontend properly disconnects sockets on page unload"
+);
+console.log("2. Don't create new socket connections on every component mount");
+console.log("3. Use a single socket instance per user session");
+console.log("4. Implement proper error handling and reconnection logic");
+console.log("5. Monitor connection counts in your frontend");
