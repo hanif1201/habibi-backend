@@ -376,6 +376,126 @@ class PushNotificationService {
   }
 
   /**
+   * Send expiration warning notification to a user
+   */
+  async sendExpirationWarningNotification(userId, matchData, hoursRemaining) {
+    try {
+      const user = await User.findById(userId)
+        .select("firstName lastName deviceTokens settings notificationStats")
+        .lean();
+
+      if (!user) {
+        return { success: false, error: "User not found" };
+      }
+
+      // Check if user can receive match notifications
+      if (!user.settings?.notifications?.matches) {
+        return { success: false, error: "Match notifications disabled" };
+      }
+
+      // Check quiet hours
+      if (this.isInQuietHours(user.settings?.notifications?.quietHours)) {
+        return { success: false, error: "User in quiet hours" };
+      }
+
+      const activeTokens =
+        user.deviceTokens?.filter((token) => token.isActive) || [];
+
+      if (activeTokens.length === 0) {
+        return { success: false, error: "No active device tokens" };
+      }
+
+      const tokens = activeTokens.map((device) => device.token);
+
+      // Determine notification content based on urgency
+      let title, body, requireInteraction, vibrate;
+
+      if (hoursRemaining <= 1) {
+        title = "🚨 FINAL WARNING: Match Expiring!";
+        body = `Your match with ${matchData.matchedUserName} expires in 1 hour!`;
+        requireInteraction = true;
+        vibrate = user.settings?.notifications?.vibration
+          ? [500, 200, 500, 200, 500]
+          : null;
+      } else if (hoursRemaining <= 2) {
+        title = "🚨 CRITICAL: Match Expiring Soon!";
+        body = `Your match with ${matchData.matchedUserName} expires in ${hoursRemaining} hours!`;
+        requireInteraction = true;
+        vibrate = user.settings?.notifications?.vibration
+          ? [400, 200, 400, 200, 400]
+          : null;
+      } else {
+        title = "⏰ Match Expiring Soon";
+        body = `Your match with ${matchData.matchedUserName} expires in ${hoursRemaining} hours`;
+        requireInteraction = false;
+        vibrate = user.settings?.notifications?.vibration
+          ? [300, 100, 300]
+          : null;
+      }
+
+      const notification = {
+        title,
+        body,
+        icon: matchData.matchedUserPhoto || "/icon-192x192.png",
+        badge: 1,
+        tag: `expiration_${matchData.matchId}`,
+        data: {
+          type: "expiration_warning",
+          matchId: matchData.matchId,
+          matchedUserId: matchData.matchedUserId,
+          matchedUserName: matchData.matchedUserName,
+          hoursRemaining,
+          url: `/chat/${matchData.matchId}`,
+        },
+        actions: [
+          {
+            action: "message",
+            title: "Send Message",
+            icon: "/message-icon.png",
+          },
+          {
+            action: "view",
+            title: "View Match",
+            icon: "/profile-icon.png",
+          },
+        ],
+        requireInteraction,
+        vibrate,
+      };
+
+      const result = await firebaseService.sendNotification(
+        tokens,
+        notification
+      );
+
+      // Update user's notification stats if successful
+      if (result.success && result.successCount > 0) {
+        await User.findByIdAndUpdate(userId, {
+          $inc: { "notificationStats.sent": result.successCount },
+          $set: { "notificationStats.lastNotificationSent": new Date() },
+        });
+      }
+
+      // Clean up invalid tokens
+      if (result.invalidTokens && result.invalidTokens.length > 0) {
+        await this.cleanupInvalidTokens(userId, result.invalidTokens);
+      }
+
+      return {
+        success: result.success,
+        sentTo: result.successCount || 0,
+        totalDevices: activeTokens.length,
+        failed: result.failureCount || 0,
+        error: result.error,
+        simulated: result.simulated,
+      };
+    } catch (error) {
+      console.error("Expiration warning notification error:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
    * Subscribe user to a topic
    */
   async subscribeToTopic(userId, topic) {

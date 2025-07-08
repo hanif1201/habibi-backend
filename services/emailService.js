@@ -154,6 +154,12 @@ class EmailService {
       "weekly-matches.html",
       "new-match.html", // Added new match template
       "reminder.html",
+      // Progressive expiration warning templates
+      "match-expiration-24h.html",
+      "match-expiration-12h.html",
+      "match-expiration-6h.html",
+      "match-expiration-2h.html",
+      "match-expiration-1h.html",
     ];
 
     for (const templateFile of templateFiles) {
@@ -700,6 +706,76 @@ class EmailService {
       actionText: reminderData.actionText || "Take Action",
       footerMessage: reminderData.footerMessage || "See you soon! 💕",
     });
+  }
+
+  // *** NEW: Send Progressive Expiration Warning Email ***
+  async sendExpirationWarningEmail(user, match, otherUser, hoursRemaining) {
+    try {
+      const chatUrl = `${process.env.FRONTEND_URL}/chat/${match._id}`;
+      const appUrl = process.env.FRONTEND_URL;
+      const unsubscribeUrl = `${
+        process.env.FRONTEND_URL
+      }/unsubscribe?email=${encodeURIComponent(user.email)}`;
+
+      // Determine template and subject based on hours remaining
+      let templateName, subject;
+
+      switch (hoursRemaining) {
+        case 24:
+          templateName = "match-expiration-24h";
+          subject = "⏰ Your match expires in 24 hours";
+          break;
+        case 12:
+          templateName = "match-expiration-12h";
+          subject = "⚠️ Your match expires in 12 hours!";
+          break;
+        case 6:
+          templateName = "match-expiration-6h";
+          subject = "🚨 URGENT: Your match expires in 6 hours!";
+          break;
+        case 2:
+          templateName = "match-expiration-2h";
+          subject = "🚨 CRITICAL: Your match expires in 2 hours!";
+          break;
+        case 1:
+          templateName = "match-expiration-1h";
+          subject = "🚨 FINAL WARNING: Your match expires in 1 hour!";
+          break;
+        default:
+          templateName = "match-expiration-6h";
+          subject = "⏰ Your match expires soon!";
+      }
+
+      const templateData = {
+        firstName: user.firstName,
+        matchName: otherUser.firstName,
+        timeRemaining: hoursRemaining,
+        actionUrl: chatUrl,
+        appUrl,
+        unsubscribeUrl,
+      };
+
+      const result = await this.sendEmail(
+        user.email,
+        subject,
+        templateName,
+        templateData
+      );
+
+      if (result.success) {
+        console.log(
+          `⏰ ${hoursRemaining}h expiration warning sent to ${user.firstName} (${user.email}) about match with ${otherUser.firstName}`
+        );
+      }
+
+      return result;
+    } catch (error) {
+      console.error("❌ Error sending expiration warning email:", error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
   }
 
   // === UTILITY METHODS ===

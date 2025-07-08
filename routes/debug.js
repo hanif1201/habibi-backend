@@ -4,6 +4,7 @@ const { authenticate } = require("../middleware/auth");
 const User = require("../models/User");
 const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
+const emailJobs = require("../jobs/emailJobs");
 
 const router = express.Router();
 
@@ -190,6 +191,159 @@ router.post("/test-match-notification", authenticate, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error testing match notification",
+      error: error.message,
+    });
+  }
+});
+
+// @route   POST /api/debug/test-expiration-warnings
+// @desc    Test progressive expiration warnings functionality
+// @access  Private
+router.post("/test-expiration-warnings", authenticate, async (req, res) => {
+  try {
+    const { hoursRemaining, matchId } = req.body;
+
+    // If matchId is provided, create a test match with specific expiration
+    if (matchId) {
+      const match = await Match.findById(matchId);
+      if (!match) {
+        return res.status(404).json({
+          success: false,
+          message: "Match not found",
+        });
+      }
+
+      // Update match expiration for testing
+      const testExpiration = new Date(
+        Date.now() + hoursRemaining * 60 * 60 * 1000
+      );
+      match.expiresAt = testExpiration;
+      match.firstMessageSentAt = null; // Ensure no first message
+      match.status = "active";
+
+      // Reset warning flags for testing
+      match.warningSent = {
+        24: false,
+        12: false,
+        6: false,
+        2: false,
+        1: false,
+      };
+
+      await match.save();
+
+      console.log(
+        `🧪 Debug: Updated match ${matchId} to expire in ${hoursRemaining} hours`
+      );
+    }
+
+    // Trigger expiration warnings
+    const result = await emailJobs.triggerExpirationWarnings(hoursRemaining);
+
+    console.log("🧪 Debug: Test expiration warnings triggered:", result);
+
+    res.json({
+      success: true,
+      message: "Test expiration warnings triggered",
+      data: {
+        hoursRemaining,
+        matchId,
+        result,
+      },
+    });
+  } catch (error) {
+    console.error("❌ Debug: Error testing expiration warnings:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error testing expiration warnings",
+      error: error.message,
+    });
+  }
+});
+
+// @route   GET /api/debug/expiration-stats
+// @desc    Get statistics about matches and their expiration status
+// @access  Private
+router.get("/expiration-stats", authenticate, async (req, res) => {
+  try {
+    const now = new Date();
+
+    // Get matches by expiration status
+    const activeMatches = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+    });
+
+    const expiringIn24h = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: now,
+        $lt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
+      },
+    });
+
+    const expiringIn12h = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: now,
+        $lt: new Date(now.getTime() + 12 * 60 * 60 * 1000),
+      },
+    });
+
+    const expiringIn6h = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: now,
+        $lt: new Date(now.getTime() + 6 * 60 * 60 * 1000),
+      },
+    });
+
+    const expiringIn2h = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: now,
+        $lt: new Date(now.getTime() + 2 * 60 * 60 * 1000),
+      },
+    });
+
+    const expiringIn1h = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: {
+        $gt: now,
+        $lt: new Date(now.getTime() + 1 * 60 * 60 * 1000),
+      },
+    });
+
+    const expiredMatches = await Match.countDocuments({
+      status: "active",
+      firstMessageSentAt: null,
+      expiresAt: { $lt: now },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        currentTime: now,
+        activeMatches,
+        expiringIn24h,
+        expiringIn12h,
+        expiringIn6h,
+        expiringIn2h,
+        expiringIn1h,
+        expiredMatches,
+        warningIntervals: [24, 12, 6, 2, 1],
+      },
+    });
+  } catch (error) {
+    console.error("❌ Debug: Error getting expiration stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error getting expiration stats",
       error: error.message,
     });
   }

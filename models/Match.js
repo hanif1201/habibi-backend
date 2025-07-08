@@ -52,6 +52,18 @@ const MatchSchema = new mongoose.Schema(
       ref: "User",
       default: null,
     },
+    // Progressive expiration warning tracking
+    warningSent: {
+      24: { type: Boolean, default: false }, // 24 hours remaining
+      12: { type: Boolean, default: false }, // 12 hours remaining
+      6: { type: Boolean, default: false }, // 6 hours remaining
+      2: { type: Boolean, default: false }, // 2 hours remaining
+      1: { type: Boolean, default: false }, // 1 hour remaining
+    },
+    lastWarningSentAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -183,6 +195,55 @@ MatchSchema.methods.canSendFirstMessage = function (userId) {
   if (this.firstMessageSentAt) return true;
   if (this.isExpired) return false;
   return this.users.includes(userId);
+};
+
+// Instance method to check and mark warning sent for a specific time interval
+MatchSchema.methods.shouldSendWarning = function (hoursRemaining) {
+  // If match has first message or is not active, no warnings needed
+  if (this.firstMessageSentAt || this.status !== "active") {
+    return false;
+  }
+
+  // Check if we're within the warning window
+  const now = new Date();
+  const timeLeft = Math.ceil((this.expiresAt - now) / (1000 * 60 * 60)); // Hours
+
+  // Only send warning if we're exactly at the target hours remaining
+  if (timeLeft !== hoursRemaining) {
+    return false;
+  }
+
+  // Check if warning was already sent for this interval
+  if (this.warningSent[hoursRemaining]) {
+    return false;
+  }
+
+  return true;
+};
+
+// Instance method to mark warning as sent
+MatchSchema.methods.markWarningSent = function (hoursRemaining) {
+  this.warningSent[hoursRemaining] = true;
+  this.lastWarningSentAt = new Date();
+  return this.save();
+};
+
+// Instance method to get current warning level
+MatchSchema.methods.getWarningLevel = function () {
+  if (this.firstMessageSentAt || this.status !== "active") {
+    return "none";
+  }
+
+  const now = new Date();
+  const timeLeft = Math.ceil((this.expiresAt - now) / (1000 * 60 * 60)); // Hours
+
+  if (timeLeft <= 0) return "expired";
+  if (timeLeft <= 1) return "critical-1h";
+  if (timeLeft <= 2) return "critical-2h";
+  if (timeLeft <= 6) return "urgent-6h";
+  if (timeLeft <= 12) return "warning-12h";
+  if (timeLeft <= 24) return "notice-24h";
+  return "normal";
 };
 
 module.exports = mongoose.model("Match", MatchSchema);

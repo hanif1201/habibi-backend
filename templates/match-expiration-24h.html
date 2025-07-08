@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Match Expiring Soon - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .button {
+        background: #ff69b4;
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+      .notice {
+        background: #e3f2fd;
+        border: 1px solid #2196f3;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+      }
+      .time-remaining {
+        background: #fff3e0;
+        border: 1px solid #ff9800;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+        text-align: center;
+        font-size: 18px;
+        font-weight: bold;
+        color: #e65100;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>⏰ Match Expiring Soon</h1>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}!</h2>
+
+      <div class="notice">
+        <p style="margin: 0; font-size: 16px; line-height: 1.6">
+          You have a great match with <strong>{{matchName}}</strong> that's
+          waiting for you to make the first move!
+        </p>
+      </div>
+
+      <div class="time-remaining">
+        <p style="margin: 0">⏰ {{timeRemaining}} hours remaining</p>
+      </div>
+
+      <p style="color: #666; font-size: 14px; line-height: 1.6">
+        Don't let this connection slip away! Send a message to start a
+        conversation and keep your match active.
+      </p>
+
+      <a href="{{actionUrl}}" class="button">Send a Message</a>
+
+      <p style="color: #666; font-size: 14px; margin-top: 30px">
+        💕 Take a chance on love - your perfect match is waiting!
+      </p>
+    </div>
+    <div class="footer">
+      <p>Thanks for using Habibi! 💕<br />The Habibi Team</p>
+    </div>
+  </body>
+</html>

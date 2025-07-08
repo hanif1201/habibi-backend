@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Match Expiring Soon - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #ff9800, #f57c00);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .button {
+        background: #ff9800;
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+      .warning {
+        background: #fff3e0;
+        border: 1px solid #ff9800;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+      }
+      .time-remaining {
+        background: #ffebee;
+        border: 1px solid #f44336;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+        text-align: center;
+        font-size: 18px;
+        font-weight: bold;
+        color: #c62828;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>⚠️ Match Expiring Soon!</h1>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}!</h2>
+
+      <div class="warning">
+        <p style="margin: 0; font-size: 16px; line-height: 1.6">
+          Your match with <strong>{{matchName}}</strong> is running out of time!
+          Don't miss this opportunity to connect.
+        </p>
+      </div>
+
+      <div class="time-remaining">
+        <p style="margin: 0">⏰ Only {{timeRemaining}} hours left!</p>
+      </div>
+
+      <p style="color: #666; font-size: 14px; line-height: 1.6">
+        This could be the start of something amazing! Send a message now to keep
+        your match alive and start a conversation.
+      </p>
+
+      <a href="{{actionUrl}}" class="button">Send Message Now</a>
+
+      <p style="color: #666; font-size: 14px; margin-top: 30px">
+        ⚡ Time is running out - act now before it's too late!
+      </p>
+    </div>
+    <div class="footer">
+      <p>Thanks for using Habibi! 💕<br />The Habibi Team</p>
+    </div>
+  </body>
+</html>

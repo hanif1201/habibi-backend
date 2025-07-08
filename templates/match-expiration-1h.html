@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>FINAL WARNING: Match Expiring in 1 Hour - Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #b71c1c, #8e0000);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .button {
+        background: #b71c1c;
+        color: white;
+        padding: 20px 40px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+        font-weight: bold;
+        font-size: 18px;
+        box-shadow: 0 4px 8px rgba(183, 28, 28, 0.3);
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+      .final-warning {
+        background: #ffcdd2;
+        border: 4px solid #b71c1c;
+        padding: 25px;
+        border-radius: 5px;
+        margin: 20px 0;
+      }
+      .time-remaining {
+        background: #b71c1c;
+        color: white;
+        padding: 25px;
+        border-radius: 5px;
+        margin: 20px 0;
+        text-align: center;
+        font-size: 28px;
+        font-weight: bold;
+      }
+      .blink {
+        animation: blink 0.8s infinite;
+      }
+      @keyframes blink {
+        0% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.3;
+        }
+        100% {
+          opacity: 1;
+        }
+      }
+      .urgent-text {
+        color: #b71c1c;
+        font-size: 18px;
+        font-weight: bold;
+        text-align: center;
+        margin: 20px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>🚨 FINAL WARNING: Match Expiring!</h1>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}!</h2>
+
+      <div class="final-warning">
+        <p style="margin: 0; font-size: 20px; line-height: 1.6">
+          <strong>FINAL WARNING:</strong> Your match with
+          <strong>{{matchName}}</strong> will expire in just 1 hour! This is
+          your ABSOLUTE LAST CHANCE to connect.
+        </p>
+      </div>
+
+      <div class="time-remaining blink">
+        <p style="margin: 0">🚨 ONLY {{timeRemaining}} HOUR LEFT!</p>
+      </div>
+
+      <p style="color: #666; font-size: 16px; line-height: 1.6">
+        <strong>This is it!</strong> After this hour, your match with
+        {{matchName}} will disappear forever. Don't let this connection slip
+        away!
+      </p>
+
+      <a href="{{actionUrl}}" class="button">SEND MESSAGE NOW</a>
+
+      <p class="urgent-text">
+        ⚡ FINAL WARNING - This match will be lost forever in just 1 hour!
+      </p>
+    </div>
+    <div class="footer">
+      <p>Thanks for using Habibi! 💕<br />The Habibi Team</p>
+    </div>
+  </body>
+</html>

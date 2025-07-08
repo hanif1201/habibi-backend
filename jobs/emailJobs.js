@@ -44,11 +44,11 @@ class EmailJobs {
       )
     );
 
-    // Match expiration warnings - Every 6 hours
+    // Progressive match expiration warnings - Every hour
     this.jobs.set(
       "match-expiration",
       cron.schedule(
-        "0 */6 * * *",
+        "0 * * * *",
         async () => {
           await this.sendMatchExpirationWarnings();
         },
@@ -313,28 +313,76 @@ class EmailJobs {
 
   async sendMatchExpirationWarnings() {
     try {
-      console.log("⏰ Starting match expiration warnings...");
+      console.log("⏰ Starting progressive match expiration warnings...");
 
       const now = new Date();
-      const in12Hours = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+      const warningIntervals = [24, 12, 6, 2, 1]; // Hours remaining
+      let totalEmailsSent = 0;
+      let totalPushNotificationsSent = 0;
 
-      // Find matches expiring in the next 12 hours
-      const expiringMatches = await Match.find({
+      for (const hoursRemaining of warningIntervals) {
+        try {
+          const emailsSent = await this.processExpirationWarnings(
+            hoursRemaining,
+            now
+          );
+          const pushNotificationsSent =
+            await this.processExpirationPushNotifications(hoursRemaining, now);
+
+          totalEmailsSent += emailsSent;
+          totalPushNotificationsSent += pushNotificationsSent;
+
+          console.log(
+            `⏰ ${hoursRemaining}h warnings: ${emailsSent} emails, ${pushNotificationsSent} push notifications sent`
+          );
+        } catch (error) {
+          console.error(
+            `❌ Error processing ${hoursRemaining}h warnings:`,
+            error
+          );
+        }
+      }
+
+      console.log(
+        `⏰ Progressive expiration warnings complete: ${totalEmailsSent} emails, ${totalPushNotificationsSent} push notifications sent`
+      );
+    } catch (error) {
+      console.error(
+        "❌ Error in progressive match expiration warnings job:",
+        error
+      );
+    }
+  }
+
+  async processExpirationWarnings(hoursRemaining, now) {
+    try {
+      // Calculate the time window for this specific interval
+      const timeWindowStart = new Date(
+        now.getTime() + hoursRemaining * 60 * 60 * 1000
+      );
+      const timeWindowEnd = new Date(
+        timeWindowStart.getTime() + 60 * 60 * 1000
+      ); // 1 hour window
+
+      // Find matches that should receive warnings for this interval
+      const matchesToWarn = await Match.find({
         status: "active",
         firstMessageSentAt: null,
         expiresAt: {
-          $gt: now,
-          $lt: in12Hours,
+          $gte: timeWindowStart,
+          $lt: timeWindowEnd,
         },
+        [`warningSent.${hoursRemaining}`]: { $ne: true }, // Haven't sent this warning yet
       }).populate("users", "firstName lastName email settings");
 
       let emailsSent = 0;
 
-      for (const match of expiringMatches) {
+      for (const match of matchesToWarn) {
         try {
-          const timeLeft = Math.ceil(
-            (match.expiresAt - now) / (1000 * 60 * 60)
-          ); // Hours
+          // Double-check if we should send this warning
+          if (!match.shouldSendWarning(hoursRemaining)) {
+            continue;
+          }
 
           for (const user of match.users) {
             // Check if user wants expiration warnings
@@ -349,45 +397,131 @@ class EmailJobs {
               (u) => u._id.toString() !== user._id.toString()
             );
 
-            const reminderData = {
-              subject: "⏰ Your match expires soon!",
-              title: "⏰ Match Expiring Soon!",
-              message: `Your match with ${
-                otherUser.firstName
-              } expires in ${timeLeft} hour${
-                timeLeft !== 1 ? "s" : ""
-              }! Send a message before it's too late.`,
-              actionUrl: `${process.env.FRONTEND_URL}/chat/${match._id}`,
-              actionText: "Send a Message",
-              footerMessage: "Don't let love slip away! 💕",
-            };
-
-            const result = await emailService.sendReminderEmail(
+            // Send email warning
+            const emailResult = await emailService.sendExpirationWarningEmail(
               user,
-              reminderData
+              match,
+              otherUser,
+              hoursRemaining
             );
 
-            if (result.success) {
+            if (emailResult.success) {
               emailsSent++;
-              console.log(
-                `⏰ Expiration warning sent to ${user.firstName} (${user.email})`
-              );
             }
 
-            // Rate limiting
+            // Rate limiting between emails
             await new Promise((resolve) => setTimeout(resolve, 150));
           }
+
+          // Mark warning as sent for this match
+          await match.markWarningSent(hoursRemaining);
         } catch (error) {
           console.error(
-            `❌ Error sending expiration warning for match ${match._id}:`,
+            `❌ Error sending ${hoursRemaining}h warning for match ${match._id}:`,
             error
           );
         }
       }
 
-      console.log(`⏰ Expiration warnings complete: ${emailsSent} sent`);
+      return emailsSent;
     } catch (error) {
-      console.error("❌ Error in match expiration warnings job:", error);
+      console.error(
+        `❌ Error processing ${hoursRemaining}h email warnings:`,
+        error
+      );
+      return 0;
+    }
+  }
+
+  async processExpirationPushNotifications(hoursRemaining, now) {
+    try {
+      // Only send push notifications for critical intervals (2h and 1h)
+      if (hoursRemaining > 2) {
+        return 0;
+      }
+
+      const pushNotificationService = require("../services/pushNotificationService");
+
+      // Calculate the time window for this specific interval
+      const timeWindowStart = new Date(
+        now.getTime() + hoursRemaining * 60 * 60 * 1000
+      );
+      const timeWindowEnd = new Date(
+        timeWindowStart.getTime() + 60 * 60 * 1000
+      ); // 1 hour window
+
+      // Find matches that should receive push notifications for this interval
+      const matchesToWarn = await Match.find({
+        status: "active",
+        firstMessageSentAt: null,
+        expiresAt: {
+          $gte: timeWindowStart,
+          $lt: timeWindowEnd,
+        },
+        [`warningSent.${hoursRemaining}`]: { $ne: true }, // Haven't sent this warning yet
+      }).populate("users", "firstName lastName photos settings");
+
+      let pushNotificationsSent = 0;
+
+      for (const match of matchesToWarn) {
+        try {
+          // Double-check if we should send this warning
+          if (!match.shouldSendWarning(hoursRemaining)) {
+            continue;
+          }
+
+          for (const user of match.users) {
+            // Check if user wants push notifications
+            if (
+              user.settings?.notifications?.push === false ||
+              user.settings?.notifications?.matchExpiring === false
+            ) {
+              continue;
+            }
+
+            const otherUser = match.users.find(
+              (u) => u._id.toString() !== user._id.toString()
+            );
+
+            const matchData = {
+              matchId: match._id.toString(),
+              matchedUserId: otherUser._id.toString(),
+              matchedUserName: otherUser.firstName,
+              matchedUserPhoto:
+                otherUser.photos?.find((p) => p.isPrimary)?.url ||
+                otherUser.photos?.[0]?.url,
+            };
+
+            // Send push notification
+            const pushResult =
+              await pushNotificationService.sendExpirationWarningNotification(
+                user._id,
+                matchData,
+                hoursRemaining
+              );
+
+            if (pushResult.success && pushResult.sentTo > 0) {
+              pushNotificationsSent++;
+            }
+
+            // Rate limiting between notifications
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        } catch (error) {
+          console.error(
+            `❌ Error sending ${hoursRemaining}h push notification for match ${match._id}:`,
+            error
+          );
+        }
+      }
+
+      return pushNotificationsSent;
+    } catch (error) {
+      console.error(
+        `❌ Error processing ${hoursRemaining}h push notifications:`,
+        error
+      );
+      return 0;
     }
   }
 
@@ -675,6 +809,38 @@ class EmailJobs {
       return await emailService.sendWelcomeEmail(user, verificationToken);
     } catch (error) {
       console.error("Error triggering welcome email:", error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  async triggerExpirationWarnings(hoursRemaining = null) {
+    try {
+      if (hoursRemaining) {
+        // Test specific interval
+        const now = new Date();
+        const emailsSent = await this.processExpirationWarnings(
+          hoursRemaining,
+          now
+        );
+        const pushNotificationsSent =
+          await this.processExpirationPushNotifications(hoursRemaining, now);
+
+        return {
+          success: true,
+          message: `${hoursRemaining}h expiration warnings triggered`,
+          emailsSent,
+          pushNotificationsSent,
+        };
+      } else {
+        // Test all intervals
+        await this.sendMatchExpirationWarnings();
+        return {
+          success: true,
+          message: "All expiration warnings triggered",
+        };
+      }
+    } catch (error) {
+      console.error("Error triggering expiration warnings:", error);
       return { success: false, error: error.message };
     }
   }
