@@ -6,6 +6,7 @@ const Swipe = require("../models/Swipe");
 const Match = require("../models/Match");
 const Message = require("../models/Message");
 const pushNotificationService = require("../services/pushNotificationService");
+const { getConversationStarters } = require("../services/notificationService");
 
 const router = express.Router();
 
@@ -683,6 +684,30 @@ router.post(
         const otherUser = match.users.find(
           (user) => user._id.toString() !== swiperId.toString()
         );
+        // Calculate compatibility score if available
+        let compatibilityScore = null;
+        if (typeof calculateCompatibilityScore === "function") {
+          compatibilityScore = calculateCompatibilityScore(
+            currentUser,
+            otherUser
+          );
+        }
+        // Conversation starters
+        const conversationStarters = getConversationStarters(
+          currentUser,
+          otherUser
+        );
+        // Urgency level and time remaining
+        const urgencyLevel =
+          match.urgencyLevel ||
+          (typeof match.get === "function" ? match.get("urgencyLevel") : null);
+        const timeToExpiration =
+          match.timeToExpiration ||
+          (typeof match.get === "function"
+            ? match.get("timeToExpiration")
+            : null);
+        // Celebration data
+        const celebration = { confetti: true, animation: "match" };
         response.match = {
           _id: match._id,
           otherUser: {
@@ -690,16 +715,23 @@ router.post(
             firstName: otherUser.firstName,
             lastName: otherUser.lastName,
             age: calculateAge(otherUser.dateOfBirth),
+            bio: otherUser.bio,
             photos: otherUser.photos,
             primaryPhoto:
               otherUser.photos?.find((p) => p.isPrimary) ||
               otherUser.photos?.[0],
             verification: otherUser.verification,
+            gender: otherUser.gender,
+            // Add more profile fields as needed
           },
           matchedAt: match.matchedAt,
           matchType: match.matchType,
           expiresAt: match.expiresAt,
-          timeToExpiration: match.timeToExpiration,
+          timeToExpiration,
+          urgencyLevel,
+          compatibilityScore,
+          conversationStarters,
+          celebration,
         };
       }
 

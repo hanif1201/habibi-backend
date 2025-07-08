@@ -312,4 +312,18 @@ class NotificationService {
   }
 }
 
+// Utility: Generate conversation starters for a match
+function getConversationStarters(userA, userB) {
+  // Simple static starters, can be enhanced with shared interests, etc.
+  const starters = [
+    `Hi ${userB.firstName}! How's your day going?`,
+    `I love your photos! Where was that photo taken?`,
+    `We seem to have something in common. Tell me more about [shared interest]`,
+    `${userB.firstName}, your bio made me smile! Tell me more about [specific detail]`,
+  ];
+  // Optionally, add more dynamic starters based on userA/userB
+  return starters;
+}
+
 module.exports = NotificationService;
+module.exports.getConversationStarters = getConversationStarters;
