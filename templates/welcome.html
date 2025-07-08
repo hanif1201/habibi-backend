@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Welcome to Habibi</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 600px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .header {
+        background: linear-gradient(135deg, #ff69b4, #ff1493);
+        color: white;
+        padding: 30px;
+        text-align: center;
+        border-radius: 10px 10px 0 0;
+      }
+      .content {
+        background: white;
+        padding: 30px;
+        border: 1px solid #ddd;
+      }
+      .button {
+        background: #ff69b4;
+        color: white;
+        padding: 15px 30px;
+        text-decoration: none;
+        border-radius: 25px;
+        display: inline-block;
+        margin: 20px 0;
+      }
+      .footer {
+        background: #f8f9fa;
+        padding: 20px;
+        text-align: center;
+        color: #666;
+        border-radius: 0 0 10px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>💕 Welcome to Habibi!</h1>
+      <p>Your journey to find love starts here</p>
+    </div>
+    <div class="content">
+      <h2>Hi {{firstName}}!</h2>
+      <p>
+        Welcome to Habibi, where meaningful connections happen every day. We're
+        excited to help you find that special someone!
+      </p>
+
+      <h3>🎯 Complete Your Profile</h3>
+      <p>To get the best matches, make sure to:</p>
+      <ul>
+        <li>Add at least 3 photos</li>
+        <li>Write an engaging bio</li>
+        <li>Set your preferences</li>
+        <li>Verify your account</li>
+      </ul>
+
+      <a href="{{verificationUrl}}" class="button">Verify Your Email</a>
+
+      <h3>💡 Pro Tips for Success</h3>
+      <ul>
+        <li>Be authentic in your photos and bio</li>
+        <li>Stay active and swipe regularly</li>
+        <li>Start conversations with thoughtful messages</li>
+        <li>Be respectful and kind</li>
+      </ul>
+    </div>
+    <div class="footer">
+      <p>Happy matching! ❤️<br />The Habibi Team</p>
+      <p>
+        <small
+          >If you didn't create this account, please ignore this email.</small
+        >
+      </p>
+    </div>
+  </body>
+</html>

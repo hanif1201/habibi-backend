@@ -1,3 +1,4 @@
+// server.js - Updated with Email System Integration
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
@@ -14,6 +15,10 @@ const cron = require("node-cron");
 // Load environment variables
 dotenv.config();
 
+// Initialize Email Service and Jobs
+const emailService = require("./services/emailService");
+const emailJobs = require("./jobs/emailJobs");
+
 // Initialize Firebase on startup
 const initializeFirebase = async () => {
   try {
@@ -27,6 +32,38 @@ const initializeFirebase = async () => {
     console.log(
       "   Configure Firebase credentials in .env to enable real push notifications"
     );
+  }
+};
+
+// Initialize Email System
+const initializeEmailSystem = async () => {
+  try {
+    console.log("📧 Initializing email system...");
+
+    const emailInitialized = await emailService.initialize();
+    if (emailInitialized) {
+      console.log("✅ Email service initialized successfully");
+
+      // Start email jobs in production or if explicitly enabled
+      if (
+        process.env.NODE_ENV === "production" ||
+        process.env.ENABLE_EMAIL_JOBS === "true"
+      ) {
+        emailJobs.start();
+        console.log("📅 Email jobs started");
+      } else {
+        console.log(
+          "📅 Email jobs disabled (set ENABLE_EMAIL_JOBS=true to enable)"
+        );
+      }
+    } else {
+      console.log(
+        "⚠️  Email service initialization failed - emails will not be sent"
+      );
+    }
+  } catch (error) {
+    console.error("❌ Email system initialization error:", error);
+    console.log("⚠️  Continuing without email system");
   }
 };
 
@@ -93,6 +130,13 @@ const messageLimiter = createRateLimit(
   1 * 60 * 1000, // 1 minute
   30, // requests per window
   "Too many messages sent, please slow down."
+);
+
+// Email-specific rate limiting
+const emailLimiter = createRateLimit(
+  60 * 60 * 1000, // 1 hour
+  5, // 5 email requests per hour
+  "Too many email requests, please try again later."
 );
 
 // ===== DATABASE CONNECTION =====
@@ -219,7 +263,7 @@ const globalErrorHandler = (err, req, res, next) => {
   }
 };
 
-// ===== CLEANUP JOBS =====
+// ===== ENHANCED CLEANUP JOBS =====
 const startCleanupJobs = () => {
   // Clean up expired matches every hour
   cron.schedule("0 * * * *", async () => {
@@ -256,6 +300,17 @@ const startCleanupJobs = () => {
       await User.cleanupAllDeviceTokens(30); // Remove tokens older than 30 days
     } catch (error) {
       console.error("❌ Error in device token cleanup job:", error);
+    }
+  });
+
+  // Email-specific cleanup - expired tokens daily at 3 AM
+  cron.schedule("0 3 * * *", async () => {
+    try {
+      if (emailJobs.isRunning) {
+        await emailJobs.cleanupExpiredTokens();
+      }
+    } catch (error) {
+      console.error("❌ Error in email token cleanup job:", error);
     }
   });
 
@@ -308,31 +363,53 @@ app.use((req, res, next) => {
 app.use("/api/auth", authLimiter);
 app.use("/api/photos", uploadLimiter);
 app.use("/api/chat", messageLimiter);
+app.use("/api/auth/forgot-password", emailLimiter);
+app.use("/api/auth/resend-verification", emailLimiter);
 app.use("/api/", generalLimiter);
 
 // ===== ROUTES =====
 
-// Health check route
-app.get("/health", (req, res) => {
-  res.json({
-    success: true,
-    message: "Habibi Server is healthy! 💖",
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || "development",
-    onlineUsers: io.getOnlineUserCount ? io.getOnlineUserCount() : 0,
-    version: "1.0.0",
-    features: {
-      pushNotifications: !!process.env.FIREBASE_PROJECT_ID,
-      fileUpload: !!process.env.CLOUDINARY_CLOUD_NAME,
-      realTimeChat: true,
-      matching: true,
-    },
-  });
+// Enhanced health check route with email status
+app.get("/health", async (req, res) => {
+  try {
+    const emailHealth = await emailService.healthCheck();
+    const emailJobsStatus = emailJobs.getJobStatus();
+
+    res.json({
+      success: true,
+      message: "Habibi Server is healthy! 💖",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: process.env.NODE_ENV || "development",
+      onlineUsers: io.getOnlineUserCount ? io.getOnlineUserCount() : 0,
+      version: "1.0.0",
+      features: {
+        pushNotifications: !!process.env.FIREBASE_PROJECT_ID,
+        fileUpload: !!process.env.CLOUDINARY_CLOUD_NAME,
+        realTimeChat: true,
+        matching: true,
+        emailSystem: emailHealth.healthy,
+        emailJobs: emailJobsStatus.isRunning,
+      },
+      emailSystem: {
+        healthy: emailHealth.healthy,
+        provider: emailHealth.provider || "development",
+        templatesLoaded: emailHealth.templatesLoaded || 0,
+        jobsRunning: emailJobsStatus.isRunning,
+        totalJobs: emailJobsStatus.totalJobs,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Health check failed",
+      error: error.message,
+    });
+  }
 });
 
 // API routes - ALL YOUR ROUTES INTEGRATED
-app.use("/api/auth", require("./routes/auth"));
+app.use("/api/auth", require("./routes/auth")); // Updated with email features
 app.use("/api/photos", require("./routes/photos"));
 app.use("/api/profile", require("./routes/profile"));
 app.use("/api/matching", require("./routes/matching"));
@@ -340,6 +417,9 @@ app.use("/api/chat", require("./routes/chat"));
 app.use("/api/notifications", require("./routes/notifications").router);
 app.use("/api/safety", require("./routes/safety"));
 app.use("/api/debug", require("./routes/debug"));
+
+// NEW: Email management routes
+app.use("/api/email", require("./routes/email")); // We'll create this
 
 // ===== ERROR HANDLERS =====
 
@@ -358,6 +438,7 @@ app.use("*", (req, res) => {
       "/api/notifications/*",
       "/api/safety/*",
       "/api/debug/*",
+      "/api/email/*", // NEW
     ],
   });
 });
@@ -376,6 +457,9 @@ const startServer = async () => {
     // Initialize Firebase for push notifications
     await initializeFirebase();
 
+    // Initialize Email System
+    await initializeEmailSystem();
+
     // Start cleanup jobs
     startCleanupJobs();
 
@@ -392,13 +476,16 @@ const startServer = async () => {
       console.log("");
       console.log("🎯 Available Endpoints:");
       console.log("  • GET /health - Server health check");
-      console.log("  • /api/auth/* - Authentication (login, register)");
+      console.log(
+        "  • /api/auth/* - Authentication (login, register, password reset)"
+      );
       console.log("  • /api/profile/* - User profiles");
       console.log("  • /api/photos/* - Photo management");
       console.log("  • /api/matching/* - Discover, swipe, matches");
       console.log("  • /api/chat/* - Real-time messaging");
       console.log("  • /api/notifications/* - Push notifications");
       console.log("  • /api/safety/* - Safety & blocking features");
+      console.log("  • /api/email/* - Email management & testing");
       console.log("  • /api/debug/* - Debug endpoints");
       console.log("");
       console.log("🔥 Features Status:");
@@ -412,10 +499,31 @@ const startServer = async () => {
           process.env.CLOUDINARY_CLOUD_NAME ? "✅ Enabled" : "❌ Disabled"
         }`
       );
+      console.log(
+        `  • Email System: ${
+          emailService.initialized ? "✅ Enabled" : "⚠️  Disabled"
+        }`
+      );
+      console.log(
+        `  • Email Jobs: ${emailJobs.isRunning ? "✅ Running" : "⚠️  Stopped"}`
+      );
       console.log(`  • Real-time Chat: ✅ Enabled`);
       console.log(`  • User Matching: ✅ Enabled`);
       console.log("");
+      console.log("📧 Email Configuration:");
+      console.log(
+        `  • Provider: ${process.env.EMAIL_PROVIDER || "development"}`
+      );
+      console.log(
+        `  • From: ${process.env.FROM_NAME || "Habibi"} <${
+          process.env.FROM_EMAIL || "noreply@habibi.com"
+        }>`
+      );
+      console.log("");
       console.log("✅ Server is ready! Time to find love! 💕");
+      console.log("");
+      console.log("📝 Test email system with:");
+      console.log("  npm run email:test");
     });
   } catch (error) {
     console.error("❌ Failed to start server:", error);
@@ -427,6 +535,12 @@ const startServer = async () => {
 process.on("unhandledRejection", (err) => {
   console.error("❌ UNHANDLED REJECTION! 💥 Shutting down...");
   console.error(err.name, err.message);
+
+  // Stop email jobs gracefully
+  if (emailJobs.isRunning) {
+    emailJobs.stop();
+  }
+
   server.close(() => {
     process.exit(1);
   });
@@ -442,6 +556,13 @@ process.on("uncaughtException", (err) => {
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("👋 SIGTERM received. Shutting down gracefully...");
+
+  // Stop email jobs
+  if (emailJobs.isRunning) {
+    console.log("📧 Stopping email jobs...");
+    emailJobs.stop();
+  }
+
   server.close(() => {
     console.log("💤 Process terminated");
   });
@@ -449,6 +570,13 @@ process.on("SIGTERM", () => {
 
 process.on("SIGINT", () => {
   console.log("👋 SIGINT received. Shutting down gracefully...");
+
+  // Stop email jobs
+  if (emailJobs.isRunning) {
+    console.log("📧 Stopping email jobs...");
+    emailJobs.stop();
+  }
+
   server.close(() => {
     console.log("💤 Process terminated");
   });
