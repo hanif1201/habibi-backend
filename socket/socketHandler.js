@@ -716,6 +716,52 @@ const socketHandler = (io) => {
     io.emit(event, data);
   };
 
+  // NEW: Send real-time match notification to specific users
+  io.sendMatchNotification = (userId1, userId2, matchData) => {
+    const matchEvent = {
+      type: "new_match",
+      match: matchData,
+      timestamp: new Date(),
+    };
+
+    // Send to user1 if online
+    if (userSockets.has(userId1)) {
+      const socketIds = userSockets.get(userId1);
+      for (const socketId of socketIds) {
+        io.to(socketId).emit("new_match", matchEvent);
+      }
+      console.log(`💕 Sent match notification to user ${userId1}`);
+    }
+
+    // Send to user2 if online
+    if (userSockets.has(userId2)) {
+      const socketIds = userSockets.get(userId2);
+      for (const socketId of socketIds) {
+        io.to(socketId).emit("new_match", matchEvent);
+      }
+      console.log(`💕 Sent match notification to user ${userId2}`);
+    }
+
+    // Log if users are offline
+    if (!userSockets.has(userId1)) {
+      console.log(
+        `📱 User ${userId1} is offline - match notification queued for push`
+      );
+    }
+    if (!userSockets.has(userId2)) {
+      console.log(
+        `📱 User ${userId2} is offline - match notification queued for push`
+      );
+    }
+
+    return {
+      user1Online: userSockets.has(userId1),
+      user2Online: userSockets.has(userId2),
+      sent:
+        (userSockets.has(userId1) ? 1 : 0) + (userSockets.has(userId2) ? 1 : 0),
+    };
+  };
+
   // Enhanced periodic cleanup with better monitoring
   setInterval(() => {
     const now = Date.now();

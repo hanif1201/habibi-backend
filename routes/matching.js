@@ -457,6 +457,44 @@ router.post(
             `💕 New match created: ${currentUser.firstName} + ${swipedUser.firstName}`
           );
 
+          // *** NEW: Send Real-time Socket Match Notification ***
+          try {
+            // Prepare match data for socket notification
+            const matchData = {
+              _id: match._id,
+              users: match.users.map((user) => ({
+                _id: user._id,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                photos: user.photos,
+                primaryPhoto:
+                  user.photos?.find((p) => p.isPrimary) || user.photos?.[0],
+              })),
+              matchType: match.matchType,
+              createdAt: match.createdAt,
+              initiatedBy: match.initiatedBy,
+            };
+
+            // Send real-time socket notification to both users
+            const socketResult = req.io.sendMatchNotification(
+              swiperId.toString(),
+              swipedUserId.toString(),
+              matchData
+            );
+
+            console.log(`💕 Socket match notification sent:`, {
+              user1Online: socketResult.user1Online,
+              user2Online: socketResult.user2Online,
+              totalSent: socketResult.sent,
+            });
+          } catch (socketError) {
+            console.error(
+              "❌ Error sending socket match notification:",
+              socketError
+            );
+            // Don't fail the match creation if socket notification fails
+          }
+
           // *** NEW: Send Match Emails ***
           try {
             const emailService = require("../services/emailService");

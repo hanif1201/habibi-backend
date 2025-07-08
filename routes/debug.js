@@ -128,4 +128,71 @@ router.get("/matching", authenticate, async (req, res) => {
   }
 });
 
+// @route   POST /api/debug/test-match-notification
+// @desc    Test socket match notification functionality
+// @access  Private
+router.post("/test-match-notification", authenticate, async (req, res) => {
+  try {
+    const { user1Id, user2Id, matchData } = req.body;
+
+    if (!user1Id || !user2Id || !matchData) {
+      return res.status(400).json({
+        success: false,
+        message: "user1Id, user2Id, and matchData are required",
+      });
+    }
+
+    // Verify users exist
+    const [user1, user2] = await Promise.all([
+      User.findById(user1Id),
+      User.findById(user2Id),
+    ]);
+
+    if (!user1 || !user2) {
+      return res.status(404).json({
+        success: false,
+        message: "One or both users not found",
+      });
+    }
+
+    // Test the socket match notification
+    const socketResult = req.io.sendMatchNotification(
+      user1Id,
+      user2Id,
+      matchData
+    );
+
+    console.log("🧪 Debug: Test match notification sent:", {
+      user1: user1.firstName,
+      user2: user2.firstName,
+      socketResult,
+    });
+
+    res.json({
+      success: true,
+      message: "Test match notification sent",
+      data: {
+        user1: {
+          _id: user1._id,
+          firstName: user1.firstName,
+          online: socketResult.user1Online,
+        },
+        user2: {
+          _id: user2._id,
+          firstName: user2.firstName,
+          online: socketResult.user2Online,
+        },
+        socketResult,
+      },
+    });
+  } catch (error) {
+    console.error("❌ Debug: Error testing match notification:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error testing match notification",
+      error: error.message,
+    });
+  }
+});
+
 module.exports = router;
