@@ -82,6 +82,13 @@ const UserSchema = new mongoose.Schema(
       default: "",
       trim: true,
     },
+    interests: [
+      {
+        type: String,
+        maxlength: [50, "Interest cannot exceed 50 characters"],
+        trim: true,
+      },
+    ],
     photos: [
       {
         url: {
@@ -573,7 +580,13 @@ UserSchema.pre("save", function (next) {
   if (this.subscription?.features?.length > 0) {
     const allowedFeatures = {
       free: [],
-      premium: ["super_likes", "boosts", "rewinds", "read_receipts"],
+      premium: [
+        "super_likes",
+        "boosts",
+        "rewinds",
+        "read_receipts",
+        "priority_likes",
+      ],
       gold: [
         "unlimited_likes",
         "super_likes",

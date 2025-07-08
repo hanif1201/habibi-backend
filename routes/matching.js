@@ -1445,4 +1445,684 @@ async function sendExpiringMatchNotifications(userId) {
   }
 }
 
+// @route   GET /api/matching/who-liked-you
+// @desc    Get users who liked you (premium feature)
+// @access  Private
+router.get("/who-liked-you", authenticate, async (req, res) => {
+  try {
+    const currentUser = await User.findById(req.user._id);
+
+    if (!currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Check if user has premium subscription
+    if (!currentUser.hasPremiumFeature("priority_likes")) {
+      return res.status(403).json({
+        success: false,
+        message: "This feature requires a premium subscription",
+        requiresPremium: true,
+        feature: "priority_likes",
+      });
+    }
+
+    // Get users who liked the current user
+    const likesReceived = await Swipe.getUsersWhoLiked(currentUser._id);
+
+    // Filter out users the current user has already swiped on
+    const swipedUserIds = await Swipe.getSwipedUserIds(currentUser._id);
+    const filteredLikes = likesReceived.filter(
+      (swipe) => !swipedUserIds.includes(swipe.swiper._id)
+    );
+
+    // Format the response with enhanced user data
+    const formattedLikes = filteredLikes.map((swipe) => {
+      const user = swipe.swiper;
+      const userObj = user.toObject ? user.toObject() : user;
+
+      return {
+        _id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        age: calculateAge(user.dateOfBirth),
+        bio: user.bio,
+        photos: user.photos,
+        primaryPhoto:
+          user.photos?.find((photo) => photo.isPrimary) || user.photos?.[0],
+        gender: user.gender,
+        distance: calculateUserDistance(currentUser, user),
+        compatibilityScore: calculateCompatibilityScore(currentUser, user),
+        isOnline: isUserRecentlyActive(user.lastActive),
+        verification: user.verification || { isVerified: false },
+        likedAt: swipe.swipedAt,
+        action: swipe.action, // "like" or "superlike"
+        matchInsights: generateMatchInsights(currentUser, user),
+        icebreakerSuggestions: generateIcebreakerSuggestions(currentUser, user),
+      };
+    });
+
+    // Sort by superlikes first, then by compatibility score
+    formattedLikes.sort((a, b) => {
+      if (a.action === "superlike" && b.action !== "superlike") return -1;
+      if (a.action !== "superlike" && b.action === "superlike") return 1;
+      return b.compatibilityScore - a.compatibilityScore;
+    });
+
+    res.json({
+      success: true,
+      likes: formattedLikes,
+      summary: {
+        total: formattedLikes.length,
+        superlikes: formattedLikes.filter((like) => like.action === "superlike")
+          .length,
+        regularLikes: formattedLikes.filter((like) => like.action === "like")
+          .length,
+        verifiedUsers: formattedLikes.filter(
+          (user) => user.verification?.isVerified
+        ).length,
+        onlineNow: formattedLikes.filter((user) => user.isOnline).length,
+      },
+    });
+  } catch (error) {
+    console.error("Who liked you error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching likes received",
+    });
+  }
+});
+
+// @route   GET /api/matching/match-queue
+// @desc    Get match queue with enhanced sorting and insights
+// @access  Private
+router.get("/match-queue", authenticate, async (req, res) => {
+  try {
+    const { sort = "compatibility", limit = 20 } = req.query;
+    const currentUser = await User.findById(req.user._id);
+
+    if (!currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    // Get users already swiped on
+    const swipedUserIds = await Swipe.getSwipedUserIds(currentUser._id);
+
+    // Get current user's matches to exclude them
+    const matches = await Match.find({
+      users: currentUser._id,
+      status: "active",
+    }).select("users");
+
+    const matchedUserIds = matches.map((match) =>
+      match.users.find(
+        (userId) => userId.toString() !== currentUser._id.toString()
+      )
+    );
+
+    // Build exclusion list
+    const excludeIds = [
+      currentUser._id,
+      ...swipedUserIds,
+      ...matchedUserIds,
+      ...(currentUser.safety?.blockedUsers || []),
+    ];
+
+    // Build discovery query
+    let discoveryQuery = {
+      _id: { $nin: excludeIds },
+      isActive: true,
+      "safety.blockedUsers": { $nin: [currentUser._id] },
+    };
+
+    // Add preference filters
+    if (
+      currentUser.preferences?.interestedIn &&
+      currentUser.preferences.interestedIn !== "both"
+    ) {
+      discoveryQuery.gender = currentUser.preferences.interestedIn;
+    }
+
+    // Age range filter
+    if (currentUser.preferences?.ageRange) {
+      const currentDate = new Date();
+      const maxBirthDate = new Date(
+        currentDate.getFullYear() - currentUser.preferences.ageRange.min,
+        currentDate.getMonth(),
+        currentDate.getDate()
+      );
+      const minBirthDate = new Date(
+        currentDate.getFullYear() - currentUser.preferences.ageRange.max - 1,
+        currentDate.getMonth(),
+        currentDate.getDate()
+      );
+
+      discoveryQuery.dateOfBirth = {
+        $gte: minBirthDate,
+        $lte: maxBirthDate,
+      };
+    }
+
+    // Find potential matches
+    let potentialMatches = await User.find(discoveryQuery)
+      .select(
+        "firstName lastName bio dateOfBirth gender photos location preferences verification lastActive interests"
+      )
+      .limit(parseInt(limit) * 2); // Get more to filter and sort
+
+    // Filter by mutual interest
+    potentialMatches = potentialMatches.filter((user) => {
+      return isMutualInterest(currentUser, user);
+    });
+
+    // Filter by distance if location is available
+    if (
+      currentUser.location?.coordinates &&
+      currentUser.preferences?.maxDistance
+    ) {
+      potentialMatches = potentialMatches.filter((user) => {
+        if (!user.location?.coordinates) return true;
+        const distance = calculateDistance(
+          currentUser.location.coordinates,
+          user.location.coordinates
+        );
+        return distance <= currentUser.preferences.maxDistance;
+      });
+    }
+
+    // Calculate compatibility scores and enhance user data
+    potentialMatches = potentialMatches.map((user) => {
+      const userObj = user.toObject();
+      const compatibilityScore = calculateCompatibilityScore(currentUser, user);
+
+      return {
+        ...userObj,
+        age: calculateAge(user.dateOfBirth),
+        distance: calculateUserDistance(currentUser, user),
+        compatibilityScore,
+        primaryPhoto:
+          user.photos?.find((photo) => photo.isPrimary) || user.photos?.[0],
+        isOnline: isUserRecentlyActive(user.lastActive),
+        verification: user.verification || { isVerified: false },
+        matchInsights: generateMatchInsights(currentUser, user),
+        icebreakerSuggestions: generateIcebreakerSuggestions(currentUser, user),
+        matchReason: generateMatchReason(currentUser, user, compatibilityScore),
+      };
+    });
+
+    // Apply sorting
+    switch (sort) {
+      case "compatibility":
+        potentialMatches.sort(
+          (a, b) => b.compatibilityScore - a.compatibilityScore
+        );
+        break;
+      case "distance":
+        potentialMatches.sort(
+          (a, b) => (a.distance || Infinity) - (b.distance || Infinity)
+        );
+        break;
+      case "recent":
+        potentialMatches.sort(
+          (a, b) => new Date(b.lastActive) - new Date(a.lastActive)
+        );
+        break;
+      case "verified":
+        potentialMatches.sort((a, b) => {
+          if (a.verification.isVerified && !b.verification.isVerified)
+            return -1;
+          if (!a.verification.isVerified && b.verification.isVerified) return 1;
+          return b.compatibilityScore - a.compatibilityScore;
+        });
+        break;
+      case "online":
+        potentialMatches.sort((a, b) => {
+          if (a.isOnline && !b.isOnline) return -1;
+          if (!a.isOnline && b.isOnline) return 1;
+          return b.compatibilityScore - a.compatibilityScore;
+        });
+        break;
+      default:
+        potentialMatches.sort(
+          (a, b) => b.compatibilityScore - a.compatibilityScore
+        );
+    }
+
+    // Limit results
+    potentialMatches = potentialMatches.slice(0, parseInt(limit));
+
+    // Clean up user data for client
+    const formattedMatches = potentialMatches.map((user) => ({
+      _id: user._id,
+      firstName: user.firstName,
+      age: user.age,
+      bio: user.bio,
+      photos: user.photos,
+      primaryPhoto: user.primaryPhoto,
+      distance: user.distance,
+      isOnline: user.isOnline,
+      verification: user.verification,
+      compatibilityScore: user.compatibilityScore,
+      lastActive: user.lastActive,
+      matchInsights: user.matchInsights,
+      icebreakerSuggestions: user.icebreakerSuggestions,
+      matchReason: user.matchReason,
+    }));
+
+    res.json({
+      success: true,
+      matches: formattedMatches,
+      sort,
+      summary: {
+        total: formattedMatches.length,
+        verified: formattedMatches.filter((u) => u.verification?.isVerified)
+          .length,
+        online: formattedMatches.filter((u) => u.isOnline).length,
+        nearbyCount: formattedMatches.filter(
+          (u) => u.distance && u.distance <= 25
+        ).length,
+        highCompatibility: formattedMatches.filter(
+          (u) => u.compatibilityScore >= 80
+        ).length,
+      },
+    });
+  } catch (error) {
+    console.error("Match queue error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching match queue",
+    });
+  }
+});
+
+// @route   GET /api/matching/insights/:userId
+// @desc    Get detailed match insights for a specific user
+// @access  Private
+router.get("/insights/:userId", authenticate, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUser = await User.findById(req.user._id);
+
+    if (!currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const targetUser = await User.findById(userId);
+    if (!targetUser) {
+      return res.status(404).json({
+        success: false,
+        message: "Target user not found",
+      });
+    }
+
+    const compatibilityScore = calculateCompatibilityScore(
+      currentUser,
+      targetUser
+    );
+    const matchInsights = generateMatchInsights(currentUser, targetUser);
+    const icebreakerSuggestions = generateIcebreakerSuggestions(
+      currentUser,
+      targetUser
+    );
+    const matchReason = generateMatchReason(
+      currentUser,
+      targetUser,
+      compatibilityScore
+    );
+
+    res.json({
+      success: true,
+      insights: {
+        compatibilityScore,
+        matchInsights,
+        icebreakerSuggestions,
+        matchReason,
+        sharedInterests: findSharedInterests(currentUser, targetUser),
+        proximityInfo: generateProximityInfo(currentUser, targetUser),
+        activityCompatibility: generateActivityCompatibility(
+          currentUser,
+          targetUser
+        ),
+      },
+    });
+  } catch (error) {
+    console.error("Match insights error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching match insights",
+    });
+  }
+});
+
+// Helper functions for match discovery improvements
+
+function generateMatchInsights(user1, user2) {
+  const insights = {
+    sharedInterests: findSharedInterests(user1, user2),
+    proximity: generateProximityInfo(user1, user2),
+    activityLevel: generateActivityCompatibility(user1, user2),
+    communicationStyle: generateCommunicationInsights(user1, user2),
+    lifestyleCompatibility: generateLifestyleCompatibility(user1, user2),
+  };
+
+  return insights;
+}
+
+function findSharedInterests(user1, user2) {
+  const interests1 = user1.interests || [];
+  const interests2 = user2.interests || [];
+
+  const shared = interests1.filter((interest) =>
+    interests2.some(
+      (interest2) =>
+        interest2.toLowerCase().includes(interest.toLowerCase()) ||
+        interest.toLowerCase().includes(interest2.toLowerCase())
+    )
+  );
+
+  return {
+    count: shared.length,
+    interests: shared,
+    percentage:
+      interests1.length > 0
+        ? Math.round(
+            (shared.length / Math.max(interests1.length, interests2.length)) *
+              100
+          )
+        : 0,
+  };
+}
+
+function generateProximityInfo(user1, user2) {
+  if (!user1.location?.coordinates || !user2.location?.coordinates) {
+    return {
+      distance: null,
+      proximity: "unknown",
+      description: "Location not available",
+    };
+  }
+
+  const distance = calculateDistance(
+    user1.location.coordinates,
+    user2.location.coordinates
+  );
+
+  let proximity = "far";
+  let description = "More than 50km away";
+
+  if (distance <= 5) {
+    proximity = "very_near";
+    description = "Less than 5km away";
+  } else if (distance <= 25) {
+    proximity = "near";
+    description = "Within 25km";
+  } else if (distance <= 50) {
+    proximity = "moderate";
+    description = "Within 50km";
+  }
+
+  return {
+    distance,
+    proximity,
+    description,
+  };
+}
+
+function generateActivityCompatibility(user1, user2) {
+  const lastActive1 = user1.lastActive || new Date();
+  const lastActive2 = user2.lastActive || new Date();
+
+  const hoursSinceActive1 = (new Date() - lastActive1) / (1000 * 60 * 60);
+  const hoursSinceActive2 = (new Date() - lastActive2) / (1000 * 60 * 60);
+
+  let activityLevel = "moderate";
+  let description = "Moderate activity level";
+
+  if (hoursSinceActive1 <= 1 && hoursSinceActive2 <= 1) {
+    activityLevel = "very_active";
+    description = "Both users are very active";
+  } else if (hoursSinceActive1 <= 24 && hoursSinceActive2 <= 24) {
+    activityLevel = "active";
+    description = "Both users are active";
+  } else if (hoursSinceActive1 > 168 || hoursSinceActive2 > 168) {
+    activityLevel = "inactive";
+    description = "One or both users haven't been active recently";
+  }
+
+  return {
+    activityLevel,
+    description,
+    user1LastActive: hoursSinceActive1,
+    user2LastActive: hoursSinceActive2,
+  };
+}
+
+function generateCommunicationInsights(user1, user2) {
+  // This would be enhanced with actual messaging data
+  // For now, we'll provide basic insights based on profile completeness
+  const profileCompleteness1 = calculateProfileCompleteness(user1);
+  const profileCompleteness2 = calculateProfileCompleteness(user2);
+
+  let communicationStyle = "balanced";
+  let description = "Both users have complete profiles";
+
+  if (profileCompleteness1 < 50 || profileCompleteness2 < 50) {
+    communicationStyle = "minimal";
+    description = "One or both users have minimal profile information";
+  } else if (profileCompleteness1 > 80 && profileCompleteness2 > 80) {
+    communicationStyle = "detailed";
+    description = "Both users have detailed profiles";
+  }
+
+  return {
+    communicationStyle,
+    description,
+    user1ProfileCompleteness: profileCompleteness1,
+    user2ProfileCompleteness: profileCompleteness2,
+  };
+}
+
+function generateLifestyleCompatibility(user1, user2) {
+  // This would be enhanced with more lifestyle data
+  // For now, we'll provide basic insights
+  const ageDiff = Math.abs(
+    calculateAge(user1.dateOfBirth) - calculateAge(user2.dateOfBirth)
+  );
+
+  let lifestyleCompatibility = "moderate";
+  let description = "Moderate lifestyle compatibility";
+
+  if (ageDiff <= 5) {
+    lifestyleCompatibility = "high";
+    description = "Similar age range suggests lifestyle compatibility";
+  } else if (ageDiff > 15) {
+    lifestyleCompatibility = "low";
+    description =
+      "Significant age difference may affect lifestyle compatibility";
+  }
+
+  return {
+    lifestyleCompatibility,
+    description,
+    ageDifference: ageDiff,
+  };
+}
+
+function generateIcebreakerSuggestions(user1, user2) {
+  const suggestions = [];
+
+  // Based on shared interests
+  const sharedInterests = findSharedInterests(user1, user2);
+  if (sharedInterests.interests.length > 0) {
+    suggestions.push({
+      type: "shared_interest",
+      text: `I see you're into ${sharedInterests.interests[0]}! What's your favorite thing about it?`,
+      confidence: "high",
+    });
+  }
+
+  // Based on location
+  const proximity = generateProximityInfo(user1, user2);
+  if (proximity.proximity === "very_near" || proximity.proximity === "near") {
+    suggestions.push({
+      type: "location",
+      text: `We're pretty close to each other! Have you been to any good places around here lately?`,
+      confidence: "high",
+    });
+  }
+
+  // Based on bio content
+  if (user2.bio && user2.bio.length > 20) {
+    const bioKeywords = extractKeywords(user2.bio);
+    if (bioKeywords.length > 0) {
+      suggestions.push({
+        type: "bio",
+        text: `I loved reading your bio! ${bioKeywords[0]} sounds really interesting. Tell me more!`,
+        confidence: "medium",
+      });
+    }
+  }
+
+  // Generic suggestions
+  suggestions.push({
+    type: "generic",
+    text: "Hey! I'd love to get to know you better. What's the most exciting thing you've done recently?",
+    confidence: "low",
+  });
+
+  return suggestions.sort((a, b) => {
+    const confidenceOrder = { high: 3, medium: 2, low: 1 };
+    return confidenceOrder[b.confidence] - confidenceOrder[a.confidence];
+  });
+}
+
+function generateMatchReason(user1, user2, compatibilityScore) {
+  const reasons = [];
+
+  if (compatibilityScore >= 90) {
+    reasons.push("Exceptional compatibility based on your preferences");
+  } else if (compatibilityScore >= 80) {
+    reasons.push("High compatibility score");
+  } else if (compatibilityScore >= 70) {
+    reasons.push("Good compatibility match");
+  }
+
+  const sharedInterests = findSharedInterests(user1, user2);
+  if (sharedInterests.count > 0) {
+    reasons.push(`${sharedInterests.count} shared interests`);
+  }
+
+  const proximity = generateProximityInfo(user1, user2);
+  if (proximity.proximity === "very_near" || proximity.proximity === "near") {
+    reasons.push("Located nearby");
+  }
+
+  if (user2.verification?.isVerified) {
+    reasons.push("Verified profile");
+  }
+
+  return reasons.length > 0 ? reasons.join(", ") : "Based on your preferences";
+}
+
+function calculateProfileCompleteness(user) {
+  let score = 0;
+  let total = 0;
+
+  // Basic info
+  total += 4;
+  if (user.firstName) score += 1;
+  if (user.lastName) score += 1;
+  if (user.dateOfBirth) score += 1;
+  if (user.gender) score += 1;
+
+  // Photos
+  total += 2;
+  if (user.photos && user.photos.length > 0) score += 1;
+  if (user.photos && user.photos.length >= 3) score += 1;
+
+  // Bio
+  total += 2;
+  if (user.bio && user.bio.length > 0) score += 1;
+  if (user.bio && user.bio.length > 100) score += 1;
+
+  // Location
+  total += 1;
+  if (user.location?.coordinates) score += 1;
+
+  // Interests
+  total += 1;
+  if (user.interests && user.interests.length > 0) score += 1;
+
+  return Math.round((score / total) * 100);
+}
+
+function extractKeywords(text) {
+  // Simple keyword extraction - in production, you might use NLP libraries
+  const commonWords = [
+    "the",
+    "a",
+    "an",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "can",
+    "i",
+    "you",
+    "he",
+    "she",
+    "it",
+    "we",
+    "they",
+    "me",
+    "him",
+    "her",
+    "us",
+    "them",
+  ];
+
+  const words = text
+    .toLowerCase()
+    .replace(/[^\w\s]/g, "")
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !commonWords.includes(word));
+
+  return [...new Set(words)].slice(0, 5);
+}
+
 module.exports = router;

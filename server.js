@@ -481,7 +481,9 @@ const startServer = async () => {
       );
       console.log("  • /api/profile/* - User profiles");
       console.log("  • /api/photos/* - Photo management");
-      console.log("  • /api/matching/* - Discover, swipe, matches");
+      console.log(
+        "  • /api/matching/* - Discover, swipe, matches, who-liked-you, match-queue, insights"
+      );
       console.log("  • /api/chat/* - Real-time messaging");
       console.log("  • /api/notifications/* - Push notifications");
       console.log("  • /api/safety/* - Safety & blocking features");
