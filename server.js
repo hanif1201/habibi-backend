@@ -368,6 +368,16 @@ app.use("/api/notifications", require("./routes/notifications").router);
 app.use("/api/safety", require("./routes/safety"));
 app.use("/api/debug", require("./routes/debug"));
 
+// Backward compatibility routes (without /api prefix)
+app.use("/auth", require("./routes/auth"));
+app.use("/photos", require("./routes/photos"));
+app.use("/profile", require("./routes/profile"));
+app.use("/matching", require("./routes/matching"));
+app.use("/chat", require("./routes/chat"));
+app.use("/notifications", require("./routes/notifications").router);
+app.use("/safety", require("./routes/safety"));
+app.use("/debug", require("./routes/debug"));
+
 // ===== ERROR HANDLERS =====
 
 // 404 handler
@@ -385,6 +395,14 @@ app.use("*", (req, res) => {
       "/api/notifications/*",
       "/api/safety/*",
       "/api/debug/*",
+      "/auth/*",
+      "/photos/*",
+      "/profile/*",
+      "/matching/*",
+      "/chat/*",
+      "/notifications/*",
+      "/safety/*",
+      "/debug/*",
     ],
   });
 });
